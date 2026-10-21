@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { Loader2, Plus, Trash2 } from "lucide-react";
+import { Bug, Loader2, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { setActiveSession, useSessions } from "@/stores/sessions";
+import { useUi } from "@/stores/ui";
 import { createSession, deleteSession } from "@/services/sessions";
 import type { SessionInfo, SessionState } from "@/types/session";
 
@@ -18,6 +19,8 @@ const dotClass: Record<SessionState, string> = {
 export const Sidebar = ({ onNavigate }: { onNavigate?: () => void }) => {
   const sessions = useSessions((s) => s.sessions);
   const activeId = useSessions((s) => s.activeId);
+  const view = useUi((s) => s.view);
+  const setView = useUi((s) => s.setView);
   const [creating, setCreating] = useState(false);
   const [toDelete, setToDelete] = useState<SessionInfo | null>(null);
 
@@ -26,6 +29,7 @@ export const Sidebar = ({ onNavigate }: { onNavigate?: () => void }) => {
     try {
       const { id } = await createSession("WhatsApp");
       setActiveSession(id);
+      setView("app");
       onNavigate?.();
     } catch (e) {
       toast.error((e as Error).message);
@@ -53,6 +57,7 @@ export const Sidebar = ({ onNavigate }: { onNavigate?: () => void }) => {
             tabIndex={0}
             onClick={() => {
               setActiveSession(s.id);
+              setView("app");
               onNavigate?.();
             }}
             className={cn(
@@ -82,6 +87,19 @@ export const Sidebar = ({ onNavigate }: { onNavigate?: () => void }) => {
       <Button variant="outline" className="w-full" onClick={onNew} disabled={creating}>
         {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
         New session
+      </Button>
+
+      <Button
+        variant={view === "debug" ? "secondary" : "ghost"}
+        className="w-full justify-start"
+        onClick={() => {
+          setView("debug");
+          onNavigate?.();
+        }}
+        aria-current={view === "debug" ? "page" : undefined}
+      >
+        <Bug className="h-4 w-4" aria-hidden="true" />
+        Debug
       </Button>
 
       <ConfirmDialog

@@ -11,11 +11,14 @@ import { EmptyState } from "@/components/shared/EmptyState";
 import { ensureSessionsWired, useSessions } from "@/stores/sessions";
 import { ensureCallsWired } from "@/stores/calls";
 import { useTheme } from "@/stores/theme";
+import { useUi } from "@/stores/ui";
+import { DebugPage } from "@/pages/DebugPage";
 
 export const App = () => {
   const sessions = useSessions((s) => s.sessions);
   const activeId = useSessions((s) => s.activeId);
   const theme = useTheme((s) => s.theme);
+  const view = useUi((s) => s.view);
 
   useEffect(() => {
     ensureSessionsWired();
@@ -27,7 +30,9 @@ export const App = () => {
   return (
     <TooltipProvider delayDuration={200}>
       <AppShell>
-        {sessions.length === 0 ? (
+        {view === "debug" ? (
+          <DebugPage />
+        ) : sessions.length === 0 ? (
           <EmptyState
             icon={<PlusCircle className="h-6 w-6" />}
             title="No accounts yet"
