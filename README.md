@@ -155,8 +155,11 @@ the same way and switch between them in the sidebar.
 ### React client in dev mode
 
 ```bash
+# the Vite dev proxy targets :3001 — start the backend on that port
+go run ./cmd/server -addr :3001
+
 cd client
-npm run dev      # Vite on :5173, proxies /api → http://localhost:8080
+npm run dev      # Vite on :5173, proxies /api → http://localhost:3001
 ```
 
 For production, build the static client and serve it from the Go server:
@@ -174,7 +177,9 @@ go run ./cmd/server -static client/dist -addr :8080
 | `-db` | `wacalls.db` | SQLite session database path |
 | `-static` | `client/dist` | Static client directory (optional) |
 | `-debug` | `false` | Verbose logging (includes whatsmeow's internal log) |
+| `-debug-log` | `true` | Emit audio diagnostic events to the ring behind `GET /api/debug/logs` |
 | `-max-calls-per-session` | `8` | Max concurrent calls per session (`0` = unlimited) |
+| `-srtp-auth` | `true` | Verify the SRTP HMAC tag on receive (`false` = legacy no-verify) |
 
 ---
 
@@ -197,6 +202,16 @@ originating `sessionId`.
 | `DELETE` | `/api/sessions/{sid}/calls/{id}` | End an active call |
 | `GET` | `/api/sessions/{sid}/history` | Recent call history (up to 50 records) |
 | `GET` | `/api/events` | Server-sent events (sessions, auth, call lifecycle) |
+| `GET` | `/api/debug/logs` | In-memory diagnostic ring (`?since=&limit=`, limit cap 500) |
+
+---
+
+## Documentation
+
+Expanded technical + practical docs live in [`docs/`](./docs/README.md) —
+[getting started](./docs/getting-started.md), [architecture](./docs/architecture.md),
+[API reference](./docs/api.md), [media pipeline](./docs/media-pipeline.md),
+[development](./docs/development.md), [security](./docs/security.md).
 
 ---
 
