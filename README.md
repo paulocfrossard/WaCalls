@@ -45,25 +45,25 @@ concurrent 1:1 calls** at once — one per browser operator — routed independe
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                          BROWSER (React client)                            │
-│   mic + speaker  ·  WebRTC data channel (16 kHz PCM)  ·  HTTP + SSE         │
+│                          BROWSER (React client)                          │
+│   mic + speaker  ·  WebRTC data channel (16 kHz PCM)  ·  HTTP + SSE      │
 └───────────────────────────────┬──────────────────────────────────────────┘
                                  │  POST /api/sessions/{sid}/calls/{id}/webrtc  (SDP)
                                  │  GET  /api/events                            (SSE)
                                  ▼
 ┌──────────────────────────── GO SERVER (cmd/server) ────────────────────────┐
 │  SessionManager   registry of accounts (client + CallManager + bridge)     │
-│  Broker           SSE hub (sessions, auth, call lifecycle fan-out)          │
-│  Bridge           pion WebRTC bridge (16 kHz PCM data channel ⇄ call core)  │
+│  Broker           SSE hub (sessions, auth, call lifecycle fan-out)         │
+│  Bridge           pion WebRTC bridge (16 kHz PCM data channel ⇄ call core) │
 │                                                                            │
 │  internal/wa      VoipSocket adapter over whatsmeow                        │
 │  internal/voip    call · signaling · media · transport · core · wanode     │
-└───────────────┬──────────────────────────────────────┬────────────────────┘
+└───────────────┬──────────────────────────────────────┬─────────────────────┘
                 │ <call> signaling (Signal/USync)       │ SRTP media
                 ▼                                        ▼
         ┌───────────────┐                    ┌──────────────────────┐
-        │  WhatsApp WS  │                    │   WhatsApp relay      │
-        │  (whatsmeow)  │                    │  (SRTP over SCTP/DC)  │
+        │  WhatsApp WS  │                    │   WhatsApp relay     │
+        │  (whatsmeow)  │                    │  (SRTP over SCTP/DC) │
         └───────────────┘                    └──────────────────────┘
 ```
 
