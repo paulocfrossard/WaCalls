@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"wacalls/internal/voip/core"
+	"wacalls/internal/voip/logbuf"
 
 	"go.mau.fi/whatsmeow/types"
 )
@@ -28,6 +30,10 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{sid}/history", s.handleHistory)
 
 	mux.HandleFunc("GET /api/events", s.handleEvents)
+
+	// Debug log ring (fed by logbuf; toggle with -debug-log). Same trust
+	// model as the rest of /api: no auth, LAN-facing — see handleDebugLogs.
+	mux.HandleFunc("GET /api/debug/logs", s.handleDebugLogs)
 
 	if s.staticDir != "" {
 		if _, err := os.Stat(s.staticDir); err == nil {
@@ -74,6 +80,38 @@ func (s *server) sessionByID(w http.ResponseWriter, sid string) *Session {
 
 func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	s.broker.serveSSE(w, r, clientID(r))
+}
+
+// handleDebugLogs serves the in-memory diagnostic ring for the front-end logs
+// page.
+//
+//	GET /api/debug/logs?since=<seq>&limit=100
+//	→ {"events":[{"seq","ts","source","level","msg","fields"}],"nextSeq":N}
+//
+// Poll with since=nextSeq to tail. limit is capped at 500 (default 100).
+//
+// SECURITY: like every /api route there is no authentication here (the whole
+// API relies on being unreachable outside the LAN). Exposing this port to the
+// internet leaks call IDs, SSRCs and audio-level telemetry to anyone — keep
+// the server on a trusted network or put it behind an authenticating proxy.
+func (s *server) handleDebugLogs(w http.ResponseWriter, r *http.Request) {
+	since := int64(0)
+	if v := r.URL.Query().Get("since"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			since = n
+		}
+	}
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = min(n, 500)
+		}
+	}
+	events, nextSeq := logbuf.Default().EventsSince(since, limit)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"events":  events,
+		"nextSeq": nextSeq,
+	})
 }
 
 func (s *server) handleSessionList(w http.ResponseWriter, r *http.Request) {
@@ -213,8 +251,24 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	bridge.SetCallID(callID)
 
+	// Track every assignment: OnBrowserPCM assigned twice for the same call
+	// (two bridges surviving setBridge) is a duplication path.
+	logbuf.LogEvent("webrtc-assign", logbuf.LevelInfo, "OnBrowserPCM assigned", map[string]any{
+		"call_id": callID, "session_id": sess.id,
+	})
 	bridge.OnBrowserPCM = func(pcm []float32) {
+		// Rate-limited 5/s: mic pushes ~125 frames/s into this closure.
+		if logbuf.Enabled() && logbuf.Allow("uplink-mic:"+callID, 5) {
+			rms, peak := logbuf.PCMStats(pcm)
+			logbuf.LogEvent("uplink-mic", logbuf.LevelDebug, "browser pcm captured", map[string]any{
+				"call_id": callID,
+				"len":     len(pcm),
+				"rms":     logbuf.Round4(rms),
+				"peak":    logbuf.Round4(peak),
+			})
+		}
 		ac.cm.FeedCapturedPCM(pcm)
 	}
 	bridge.OnTerminalICE = func() {

@@ -3,9 +3,19 @@ package call
 import (
 	"time"
 	"wacalls/internal/voip/core"
+	"wacalls/internal/voip/logbuf"
 	"wacalls/internal/voip/media"
 	"wacalls/internal/voip/transport"
 )
+
+// callIDLocked returns the current call id (empty when no call is set up).
+// Callers must hold m.mu.
+func (m *CallManager) callIDLocked() string {
+	if m.currentCall != nil {
+		return m.currentCall.CallID
+	}
+	return ""
+}
 
 func (m *CallManager) initCodec() {
 	if m.codec != nil {
@@ -32,6 +42,7 @@ func (m *CallManager) FeedCapturedPCM(data []float32) {
 		m.encodeBuf = make([]float32, frameSize)
 		m.encodeBufPos = 0
 	}
+	callID := m.callIDLocked()
 
 	offset := 0
 	for offset < len(data) {
@@ -46,12 +57,32 @@ func (m *CallManager) FeedCapturedPCM(data []float32) {
 		copy(frame, m.encodeBuf)
 		m.encodeBufPos = 0
 
+		frameStart := time.Now()
 		opus, err := m.codec.Encode(frame)
 		if err != nil {
 			m.log.Debug("encode error", "err", err)
+			if logbuf.Enabled() && logbuf.Allow("encoder:"+callID, 5) {
+				logbuf.LogEvent("encoder", logbuf.LevelError, "opus encode failed", map[string]any{
+					"call_id": callID,
+					"err":     err.Error(),
+					"samples": frameSize,
+				})
+			}
 			continue
 		}
 		m.sendOpusFrameLocked(opus)
+		// Rate-limited ~5/s: 125 msg/s would refill the whole ring in 1s.
+		if logbuf.Enabled() && logbuf.Allow("uplink-frame:"+callID, 5) {
+			fields := map[string]any{
+				"call_id":       callID,
+				"len":           len(data),
+				"frame_samples": frameSize,
+			}
+			if d := time.Since(frameStart); d > 10*time.Millisecond {
+				fields["broadcast_ms"] = logbuf.Round4(float64(d.Microseconds()) / 1000.0)
+			}
+			logbuf.LogEvent("uplink-frame", logbuf.LevelDebug, "full frame encoded+protected+broadcast", fields)
+		}
 	}
 }
 
@@ -71,6 +102,14 @@ func (m *CallManager) sendOpusFrameLocked(opus []byte) {
 	srtp, err := m.srtpSession.Protect(pkt)
 	if err != nil {
 		m.log.Debug("srtp protect error", "err", err)
+		// Errors only in the ring (Protect is the only failing step;
+		// Broadcast has no error return).
+		logbuf.LogEvent("srtp", logbuf.LevelError, "srtp protect failed (frame dropped)", map[string]any{
+			"call_id": m.callIDLocked(),
+			"ssrc":    m.selfSsrc,
+			"err":     err.Error(),
+			"len":     len(pkt.Payload),
+		})
 		return
 	}
 	m.relay.Broadcast(srtp)
@@ -128,7 +167,17 @@ func (m *CallManager) onRelayData(data []byte) {
 	}
 	ssrc := uint32(data[8])<<24 | uint32(data[9])<<16 | uint32(data[10])<<8 | uint32(data[11])
 	if ssrc == m.selfSsrc {
+		callID := m.callIDLocked()
+		selfSsrc := m.selfSsrc
 		m.mu.Unlock()
+		// Logged for EVERY discard: seeing our own SSRC come back from the
+		// relay is the smoking gun for an echo/loop ("cliente se ouvindo").
+		logbuf.LogEvent("relay-filter", logbuf.LevelInfo, "dropped relay packet with own SSRC (echo/loop candidate)", map[string]any{
+			"call_id":   callID,
+			"ssrc":      ssrc,
+			"self_ssrc": selfSsrc,
+			"len":       len(data),
+		})
 		return
 	}
 	if !m.actualPeerSet {
@@ -141,11 +190,19 @@ func (m *CallManager) onRelayData(data []byte) {
 	}
 	srtp := m.srtpSession
 	codec := m.codec
+	callID := m.callIDLocked()
 	m.mu.Unlock()
 
 	pkt, err := srtp.Unprotect(data)
 	if err != nil {
 		m.log.Debug("srtp unprotect error", "err", err)
+		if logbuf.Enabled() && logbuf.Allow("srtp-unprotect:"+callID, 5) {
+			logbuf.LogEvent("srtp", logbuf.LevelError, "srtp unprotect failed (packet dropped)", map[string]any{
+				"call_id": callID,
+				"err":     err.Error(),
+				"len":     len(data),
+			})
+		}
 		return
 	}
 	if len(pkt.Payload) == 0 {
@@ -153,9 +210,26 @@ func (m *CallManager) onRelayData(data []byte) {
 	}
 	pcm, err := codec.Decode(pkt.Payload)
 	if err != nil {
+		if logbuf.Enabled() && logbuf.Allow("decoder:"+callID, 5) {
+			logbuf.LogEvent("decoder", logbuf.LevelError, "opus decode failed (frame dropped)", map[string]any{
+				"call_id":     callID,
+				"err":         err.Error(),
+				"payload_len": len(pkt.Payload),
+			})
+		}
 		return
 	}
 	pcm = media.NormalizeFrame(pcm, codec.FrameSize())
+	// Rate-limited 5/s: len/peak show whether dead air or hot audio follows.
+	if logbuf.Enabled() && logbuf.Allow("downlink-decode:"+callID, 5) {
+		rms, peak := logbuf.PCMStats(pcm)
+		logbuf.LogEvent("downlink-decode", logbuf.LevelDebug, "peer frame decoded", map[string]any{
+			"call_id": callID,
+			"samples": len(pcm),
+			"rms":     logbuf.Round4(rms),
+			"peak":    logbuf.Round4(peak),
+		})
+	}
 	if m.OnPeerAudio != nil {
 		m.OnPeerAudio(pcm)
 	}

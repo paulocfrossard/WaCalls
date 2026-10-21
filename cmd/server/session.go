@@ -9,6 +9,7 @@ import (
 
 	"wacalls/internal/voip/call"
 	"wacalls/internal/voip/core"
+	"wacalls/internal/voip/logbuf"
 	"wacalls/internal/voip/signaling"
 	"wacalls/internal/voip/wanode"
 	"wacalls/internal/wa"
@@ -91,6 +92,14 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		ac, ok := s.reg.get(callID)
 		if !ok || ac.bridge == nil {
 			return
+		}
+		// Rate-limited 5/s: two callbacks registered for this call double
+		// every frame — the dup-detector catches the paired WritePCM calls.
+		if logbuf.Enabled() && logbuf.Allow("session-audio:"+callID, 5) {
+			logbuf.LogEvent("session-audio", logbuf.LevelDebug, "peer audio forwarded to bridge", map[string]any{
+				"call_id": callID,
+				"samples": len(pcm16),
+			})
 		}
 		_ = ac.bridge.WritePCM(pcm16)
 	}
@@ -231,12 +240,24 @@ func (s *Session) info() SessionInfo {
 func (s *Session) setBridge(callID string, b *Bridge) {
 	oldB, found := s.reg.setBridge(callID, b)
 	if !found {
+		logbuf.LogEvent("bridge", logbuf.LevelWarn, "setBridge: call not found, new bridge closed", map[string]any{
+			"call_id": callID, "session_id": s.id,
+		})
 		b.Close()
 		return
 	}
 	if oldB != nil {
+		// A replaced bridge with an active WebRTC peer is a duplication
+		// suspect: log the swap explicitly.
+		logbuf.LogEvent("bridge", logbuf.LevelWarn, "setBridge: bridge replaced, old bridge closed", map[string]any{
+			"call_id": callID, "session_id": s.id, "replaced": true,
+		})
 		oldB.Close()
+		return
 	}
+	logbuf.LogEvent("bridge", logbuf.LevelInfo, "setBridge: bridge attached", map[string]any{
+		"call_id": callID, "session_id": s.id,
+	})
 }
 
 func (s *Session) removeCall(callID string) {

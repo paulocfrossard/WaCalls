@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"sync/atomic"
 
+	"wacalls/internal/voip/logbuf"
 	"wacalls/internal/voip/media"
 
 	"github.com/pion/webrtc/v4"
@@ -21,11 +22,19 @@ type Bridge struct {
 	dc  atomic.Pointer[webrtc.DataChannel]
 	log *slog.Logger
 
+	// callID correlates diagnostics (set once via SetCallID right after
+	// construction, before the bridge is published to the call registry).
+	callID string
+
 	// OnBrowserPCM is invoked with decoded 16 kHz mono PCM captured from the browser mic.
 	OnBrowserPCM func(pcm []float32)
 	// OnTerminalICE fires when the peer connection fails or closes.
 	OnTerminalICE func()
 }
+
+// SetCallID records the call this bridge belongs to for debug-log events.
+// Must be called before the bridge is shared (before Session.setBridge).
+func (b *Bridge) SetCallID(id string) { b.callID = id }
 
 func NewBridge(offerSDP string, log *slog.Logger) (*Bridge, string, error) {
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
@@ -41,6 +50,13 @@ func NewBridge(offerSDP string, log *slog.Logger) (*Bridge, string, error) {
 		br.dc.Store(dc)
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			if cb := br.OnBrowserPCM; cb != nil && len(msg.Data) > 0 {
+				// Rate-limited 5/s: the mic pushes ~125 messages/s.
+				if logbuf.Enabled() && logbuf.Allow("bridge-uplink:"+br.callID, 5) {
+					logbuf.LogEvent("bridge-uplink", logbuf.LevelDebug, "uplink datachannel message from browser", map[string]any{
+						"call_id": br.callID,
+						"len":     len(msg.Data),
+					})
+				}
 				cb(media.PCMInt16LEToFloat32(msg.Data))
 			}
 		})
@@ -80,6 +96,20 @@ func (b *Bridge) WritePCM(pcm []float32) error {
 	dc := b.dc.Load()
 	if dc == nil || len(pcm) == 0 {
 		return nil
+	}
+	if logbuf.Enabled() {
+		// Feeds the 1s dup-detector: two WritePCM <50ms apart for the same
+		// callID (healthy cadence is ~60ms) = duplicated audio path.
+		logbuf.RecordWritePCM(b.callID)
+		// Rate-limited 5/s with samples + peak for correlation.
+		if logbuf.Allow("bridge-downlink:"+b.callID, 5) {
+			_, peak := logbuf.PCMStats(pcm)
+			logbuf.LogEvent("bridge-downlink", logbuf.LevelDebug, "write pcm downlink to browser", map[string]any{
+				"call_id": b.callID,
+				"samples": len(pcm),
+				"peak":    logbuf.Round4(peak),
+			})
+		}
 	}
 	return dc.Send(media.PCMFloat32ToInt16LE(pcm))
 }

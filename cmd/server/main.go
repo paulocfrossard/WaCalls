@@ -10,6 +10,9 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"wacalls/internal/voip/logbuf"
+	"wacalls/internal/voip/media"
 )
 
 func main() {
@@ -17,8 +20,12 @@ func main() {
 	dbPath := flag.String("db", "wacalls.db", "SQLite session database path")
 	staticDir := flag.String("static", "client/dist", "static client directory (optional)")
 	debug := flag.Bool("debug", false, "verbose logging")
+	debugLog := flag.Bool("debug-log", true, "emit audio diagnostic events to the in-memory ring served at GET /api/debug/logs")
 	maxCalls := flag.Int("max-calls-per-session", 8, "max concurrent calls per session (0 = unlimited)")
+	authSRTP := flag.Bool("srtp-auth", true, "verify SRTP HMAC tag on receive (legacy: false)")
 	flag.Parse()
+	media.SetAuthVerify(*authSRTP)
+	logbuf.SetEnabled(*debugLog)
 
 	level := slog.LevelInfo
 	if *debug {
@@ -29,6 +36,10 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Watches WritePCM timestamps and warns (source=dup-detector) when two
+	// writes for the same call land <50ms apart = duplicated audio path.
+	go logbuf.StartDupDetector(ctx)
 
 	srv, err := newServer(ctx, *dbPath, *staticDir, *maxCalls, log)
 	if err != nil {
