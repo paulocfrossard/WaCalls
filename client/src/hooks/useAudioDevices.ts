@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AEC_ENABLED, AGC_ENABLED, NS_ENABLED } from "@/constants/audio";
 
 export type AudioDevice = { deviceId: string; label: string };
 
@@ -9,7 +10,18 @@ export const useAudioDevices = () => {
   useEffect(() => {
     (async () => {
       try {
-        (await navigator.mediaDevices.getUserMedia({ audio: true })).getTracks().forEach((t) => t.stop());
+        (
+          await navigator.mediaDevices.getUserMedia({
+            audio: {
+              // field A/B: same ?aec=0/?ns=0/?agc=0 flags as the call gUM
+              echoCancellation: AEC_ENABLED,
+              noiseSuppression: NS_ENABLED,
+              autoGainControl: AGC_ENABLED,
+            },
+          })
+        )
+          .getTracks()
+          .forEach((t) => t.stop());
       } catch {}
       const list = await navigator.mediaDevices.enumerateDevices();
       setMics(
