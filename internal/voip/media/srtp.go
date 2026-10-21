@@ -5,10 +5,27 @@ import (
 	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/subtle"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"sync/atomic"
 	"wacalls/internal/voip/core"
 )
+
+// ErrAuthenticate is returned by Unprotect when the SRTP auth tag does not
+// match (RFC 3711 §3.3/§4.2). Packets failing this check must be discarded.
+var ErrAuthenticate = errors.New("srtp: authentication failure")
+
+// authVerify is the kill-switch for the receive-side HMAC tag check.
+// Default ON (secure-by-default); SetAuthVerify(false) restores the legacy
+// no-verify behavior (-srtp-auth=false).
+var authVerify atomic.Bool
+
+func init() { authVerify.Store(true) }
+
+// SetAuthVerify toggles SRTP receive-side auth tag verification (kill-switch).
+func SetAuthVerify(on bool) { authVerify.Store(on) }
 
 type SrtpErrorType string
 
@@ -25,6 +42,13 @@ type SrtpError struct {
 }
 
 func (e *SrtpError) Error() string { return fmt.Sprintf("srtp %s: %s", e.Type, e.Msg) }
+
+func (e *SrtpError) Unwrap() error {
+	if e.Type == SrtpErrAuthFailed {
+		return ErrAuthenticate
+	}
+	return nil
+}
 
 type SrtpContext struct {
 	sessionKey  []byte
@@ -111,6 +135,20 @@ func (c *SrtpContext) Unprotect(data []byte) (*RtpPacket, error) {
 
 	c.updateRoc(header.SequenceNumber)
 	index := c.packetIndex(header.SequenceNumber)
+
+	// RFC 3711 §3.3 order: authenticate before decrypt. Note: there is no
+	// replay/ROC sliding-window check here — only the auth tag is verified.
+	// Index estimation uses the local ROC estimate; peers that diverge on ROC
+	// will fail auth (fail-closed).
+	// kill-switch: -srtp-auth=false restores legacy no-verify behavior
+	if authVerify.Load() {
+		recvTag := data[headerSize+payloadLen : headerSize+payloadLen+c.authTagLen]
+		authData := data[:headerSize+payloadLen]
+		expectedTag := c.computeAuthTag(authData, c.roc, c.authTagLen)
+		if subtle.ConstantTimeCompare(recvTag, expectedTag) != 1 {
+			return nil, &SrtpError{SrtpErrAuthFailed, ErrAuthenticate.Error()}
+		}
+	}
 
 	iv := c.generateIV(header.Ssrc, index)
 	decrypted := make([]byte, payloadLen)
