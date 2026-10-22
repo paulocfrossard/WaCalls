@@ -11,7 +11,7 @@ Built for native VoIP media, multi-account (multi-session) operation, and a mode
 [![pion](https://img.shields.io/badge/pion-WebRTC-FF6B6B)](https://github.com/pion/webrtc)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 
-[Overview](#overview) · [Architecture](#architecture) · [Quick Start](#quick-start) · [API](#api) · [Security](#security)
+[Overview](#overview) · [Architecture](#architecture) · [Quick Start](#quick-start) · [API](#api) · [Security](#security) · [Documentation](#documentation)
 
 </div>
 
@@ -20,7 +20,9 @@ Built for native VoIP media, multi-account (multi-session) operation, and a mode
 ## Overview
 
 WaCalls pairs one or more WhatsApp accounts via **QR code** and lets you **place and
-receive 1:1 voice calls** from any browser on the LAN. The browser microphone is sent
+receive N:N voice calls** from any browser on the LAN.
+
+The browser microphone is sent
 as **raw 16 kHz PCM over a WebRTC data channel** to the Go server, which encodes it with
 Meta's **MLow** codec and injects the media into WhatsApp's **SRTP relay** mesh — and the
 reverse path brings the peer's audio back to the browser.
@@ -32,12 +34,30 @@ integrated with [**whatsmeow**](https://github.com/tulir/whatsmeow) and served t
 pure-Go package, so a plain `go build` produces a self-contained binary with live audio.
 
 Multiple WhatsApp accounts can be paired and operated side by side, each with its own
-pairing QR, connection status, and history. A single account can also run **several
-concurrent 1:1 calls** at once — one per browser operator — routed independently by call ID.
+pairing QR, connection status, and history.
 
-> **Status:** stable. Outgoing and incoming 1:1 calls reach `ACTIVE` with bidirectional
-> audio, and a single account can hold several of them concurrently. Sessions persist in
-> `wacalls.db` (pure-Go SQLite).
+A single account can also run **several
+concurrent N:N calls** at once — one per browser operator — routed independently by call ID.
+
+In local tests, it is possible to make one account number make N calls in parallel, in my test, 4:4 works.  
+
+> **Status:** stable. Outgoing and incoming 4:4 calls reach `ACTIVE` with bidirectional in same time. audio, and a single account can hold several of them concurrently. Sessions persist in `wacalls.db` (pure-Go SQLite).
+
+--- 
+
+## Fork data
+
+**Problems in original project and Reason for fork:**
+
+### Problems in original project
+- Voice return in 20-30% of the calls in my tests;
+- The quality of audio is bad;
+- Debug is not easy;
+- Frontend minor errors;
+
+### Reason of fork
+
+Due legal rules and contract rules this fork it is necesary.
 
 ---
 
@@ -232,7 +252,7 @@ session credentials (secrets): **do not commit it** and keep it protected.
 
 ---
 
-## Contributors
+## Contributors of the original project
 
 This project builds on the work of:
 
