@@ -10,6 +10,7 @@ Built for native VoIP media, multi-account (multi-session) operation, and a mode
 [![whatsmeow](https://img.shields.io/badge/whatsmeow-VoIP-25D366?logo=whatsapp&logoColor=white)](https://github.com/tulir/whatsmeow)
 [![pion](https://img.shields.io/badge/pion-WebRTC-FF6B6B)](https://github.com/pion/webrtc)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
+![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white)
 
 [Overview](#overview) · [Architecture](#architecture) · [Quick Start](#quick-start) · [API](#api) · [Security](#security) · [Documentation](#documentation)
 
@@ -43,7 +44,26 @@ In local tests, it is possible to make one account number make N calls in parall
 
 > **Status:** stable. Outgoing and incoming 4:4 calls reach `ACTIVE` with bidirectional in same time. audio, and a single account can hold several of them concurrently. Sessions persist in `wacalls.db` (pure-Go SQLite).
 
---- 
+---
+
+## Docker 
+Simple version of the app in single docker file.
+
+Verions: Alpine and Debian
+
+[![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white)](https://hub.docker.com/repository/docker/caedpaulofrossard/wacalls/general) · [Dockerhub](https://hub.docker.com/repository/docker/caedpaulofrossard/wacalls/general)
+
+**Quick run:**
+
+```bash
+docker image pull caedpaulofrossard/wacalls:debian
+docker run -d -p 5176:8080 --name wecalls --restart=always caedpaulofrossard/wacalls:debian
+firefox 0.0.0.0:5176
+```
+
+Done!
+
+---
 
 ## Fork data
 
