@@ -45,8 +45,8 @@ npm run typecheck  # tsc --noEmit
 </script>
 ```
 
-A complete working example (config panel, buttons, event log) lives in
-[`examples/chatwoot-poc.html`](../examples/chatwoot-poc.html).
+A Chatwoot PoC example page once lived here but was removed from the repo along
+with the `examples/` directory; the snippet above is the reference usage.
 
 ## Configuration — `new WaCallsClient(config)`
 

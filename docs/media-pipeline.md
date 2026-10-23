@@ -10,7 +10,7 @@ tests under `internal/voip` (`go test ./...`).
 |---|---|---|
 | Sample rate | 16 kHz | `internal/voip/media` (RTP session, codec) |
 | Frame | **960 samples = 60 ms** | `codec.go` (`mlowFrameSize`), `mlow` encoder/decoder |
-| PCM format on the wire (browser ↔ server) | **Int16 LE, mono**, data channel labeled **`pcm`** | `cmd/server/bridge.go`, `client/src/lib/pcm.ts` |
+| PCM format on the wire (browser ↔ server) | **Int16 LE, mono**, data channel labeled **`pcm`** | `cmd/server/bridge.go`, `sdk/src/utils/pcm.ts` |
 | Codec | **MLow** (vendored, pure Go, no cgo — declared in `mlow/README.md`) | `internal/voip/media/mlow/` |
 | RTP payload type | **120** (`PayloadTypeWhatsAppOpus`) | `internal/voip/core/types.go` |
 | Media encryption | SRTP (HMAC tag verified on receive by default) | `internal/voip/media/srtp.go`, flag `-srtp-auth` |
@@ -24,8 +24,8 @@ the Int16 conversion and the data channel.
 
 ```
 mic
- └► AudioWorklet capture-processor (client/public/worklets/)
-     └► lib/webrtc.ts  → datachannel "pcm" (Int16 LE @16 kHz)
+ └► AudioWorklet capture processor (embedded in sdk/src/worklets/sources.ts)
+     └► sdk/src/core/webrtc.ts → datachannel "pcm" (Int16 LE @16 kHz)
          └► cmd/server/bridge.go  → float32 PCM
              └► CallManager: MLow encode (960-sample frames)
                  └► RTP packetization (PT=120, 16 kHz)
@@ -41,12 +41,13 @@ WhatsApp relay
      invalid tag ⇒ packet dropped (RFC 3711 behavior, see implementacao.md §1)
      └► RTP depacketize → MLow decode (960-sample / 60 ms frames, float [-1,1])
          └► bridge → Int16 LE PCM over datachannel "pcm"
-             └► AudioWorklet playback-processor → speaker
+             └► AudioWorklet playback processor → speaker
 ```
 
-Client-side helpers: `lib/pcm.ts` (Float32 ↔ Int16 LE), `lib/audio-meter.ts`
-(levels), worklets registered from `client/src/lib/webrtc.ts` via
-`audioWorklet.addModule`.
+Client-side helpers: `sdk/src/utils/pcm.ts` (Float32 ↔ Int16 LE); the in-call
+VU meters live inline in `components/domain/call/CallCard.tsx` (AnalyserNode on
+remoteStream/mic). Worklet sources are embedded in `sdk/src/worklets/sources.ts`
+and installed via Blob URLs (`audioWorklet.addModule`).
 
 ## SRTP authentication status
 
@@ -66,7 +67,7 @@ before acting; this module never re-decides them.
 | Item | Status (as of last sync with plan files) | Source |
 |---|---|---|
 | Reframe 960 → 320 samples (60 → 20 ms) | **ABORTED** — vendored MLow API requires exactly 960 samples (`encoder.go`, `opusFrameSamps = 960` in `decoder.go`); a 20 ms TOC decode only truncates output. Revisit only with an explicit decision to modify the vendored codec. | `implementacao.md` §4, `ideias.md` (Rodada 2) |
-| PLC on playback underrun | Planned item with verification criteria (not documented as shipped here — check the plan file + `client/src/lib/webrtc.ts` for current behavior) | `implementacao.md` §3 |
+| PLC on playback underrun | Planned item with verification criteria (not documented as shipped here — check the plan file + `sdk/src/core/webrtc.ts` for current behavior) | `implementacao.md` §3 |
 | DTX/VAD gate on uplink | Planned item — check plan file for status | `implementacao.md` §5 |
 | End-to-end instrumentation / one-way SLO | Planned item — check plan file; diagnostic ring (`-debug-log`, `GET /api/debug/logs`) is the current telemetry surface | `implementacao.md` §2 |
 
@@ -75,7 +76,7 @@ before acting; this module never re-decides them.
 - Server side: run with `-debug-log=true` (default) and tail
   `GET /api/debug/logs` (sources such as `bridge-uplink`, `bridge-downlink`) — or use
   the client **Debug** page (`pages/DebugPage.tsx`), which polls the same endpoint.
-- Client side: `lib/webrtc.ts` emits structured debug rows (gum, dc, ice, uplink,
+- Client side: `sdk/src/core/webrtc.ts` emits structured debug rows (gum, dc, ice, uplink,
   downlink, plc) through `lib/debug-log.ts`.
 - Reference vectors for the codec live in `internal/voip/media/mlow/testdata/`
   (upstream: `purpshell/meowcaller`, MIT — see the package

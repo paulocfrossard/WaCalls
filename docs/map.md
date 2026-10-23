@@ -8347,10 +8347,6 @@
 │   ├── package.json
 │   ├── package-lock.json
 │   ├── postcss.config.js
-│   ├── public
-│   │   └── worklets
-│   │       ├── capture-processor.js
-│   │       └── playback-processor.js
 │   ├── src
 │   │   ├── App.tsx
 │   │   ├── components
@@ -8399,21 +8395,16 @@
 │   │   │   └── useStartCall.ts
 │   │   ├── lib
 │   │   │   ├── api.ts
-│   │   │   ├── audio-meter.ts
 │   │   │   ├── client-id.ts
 │   │   │   ├── debug-log.ts
-│   │   │   ├── event-stream.ts
-│   │   │   ├── pcm.ts
 │   │   │   ├── query.ts
-│   │   │   ├── utils.ts
-│   │   │   └── webrtc.ts
+│   │   │   └── utils.ts
 │   │   ├── main.tsx
 │   │   ├── pages
 │   │   │   ├── CallsPage.tsx
 │   │   │   └── DebugPage.tsx
-│   │   ├── services
-│   │   │   ├── calls.ts
-│   │   │   ├── history.ts
+│   │   ├── services
+│   │   │   ├── history.ts
 │   │   │   └── sessions.ts
 │   │   ├── stores
 │   │   │   ├── calls.ts

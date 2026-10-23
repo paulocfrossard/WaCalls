@@ -14,8 +14,8 @@ Browser (client/)                        Go server (cmd/server)
 │ React 19 + Vite SPA      │  HTTP/SSE  │ httpapi.go  ── routes, no auth    │
 │  pages/ components/      │◄──────────►│ broker.go   ── SSE fan-out        │
 │  stores/ hooks/ services/│  /api/*    │ sessionmanager.go / sessionstore  │
-│  lib/webrtc.ts, pcm.ts   │            │ callregistry.go / callrouting.go  │
-│  worklets (capture/play) │  WebRTC    │ bridge.go   ── browser ↔ PCM leg  │
+│  sdk/src (webrtc, pcm)   │            │ callregistry.go / callrouting.go  │
+│  sdk worklets (embedded)│  WebRTC    │ bridge.go   ── browser ↔ PCM leg  │
 └──────────┬───────────────┘  (SDP)     └──────────────┬────────────────────┘
            │ datachannel "pcm" (Int16 LE, 16 kHz)      │
            │                                           ▼
@@ -89,12 +89,12 @@ Key libraries:
 | File | Role |
 |---|---|
 | `lib/api.ts` | fetch helpers; attaches advisory `X-Client-Id` header |
-| `lib/event-stream.ts` | `EventSource` on `/api/events?clientId=…`, typed `BrokerEvent` union |
-| `lib/webrtc.ts` | peer connection, SDP exchange, data channel `pcm` glue |
-| `lib/pcm.ts` | Float32 ↔ Int16 LE conversion |
-| `lib/audio-meter.ts`, `lib/debug-log.ts`, `lib/client-id.ts` | metering, debug polling, stable client id |
-| `public/worklets/capture-processor.js` | mic → PCM frames → uplink |
-| `public/worklets/playback-processor.js` | downlink PCM → speaker |
+| `sdk/src/index.ts` (SDK package) | `EventSource` on `/api/events?clientId=…`; typed `BrokerEvent` union in `client/src/types/broker.ts` |
+| `sdk/src/core/webrtc.ts` (SDK package) | peer connection, SDP exchange, data channel `pcm` glue |
+| `sdk/src/utils/pcm.ts` (SDK package) | Float32 ↔ Int16 LE conversion |
+| `lib/debug-log.ts`, `lib/client-id.ts` | debug polling, stable client id |
+| `components/domain/call/CallCard.tsx` | in-call VU/spectrum meters (AnalyserNode on remoteStream/mic) |
+| `sdk/src/worklets/sources.ts` (SDK package) | embedded capture/playback processor sources, installed via Blob URL |
 
 Imports use the `@/` alias → `client/src` (configured in `vite.config.ts`).
 

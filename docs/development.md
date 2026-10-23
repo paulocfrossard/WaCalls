@@ -89,7 +89,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 - Import alias `@/` → `client/src` (Vite `resolve.alias`).
 - Server state → TanStack Query; UI/device/session-runtime state → Zustand stores.
 - API access goes through `services/*` on top of `lib/api.ts` (which attaches
-  `X-Client-Id`); SSE goes through `lib/event-stream.ts`.
+  `X-Client-Id`); SSE goes through the SDK's EventSource (`sdk/src/index.ts`),
+  with the typed `BrokerEvent` union in `client/src/types/broker.ts`.
 - No client-side router — pages are component state.
 
 ## Debugging
