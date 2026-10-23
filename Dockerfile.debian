@@ -17,4 +17,4 @@ RUN go mod download
 RUN cd client && npm audit && npm audit fix && npm install && npm run build 
 
 EXPOSE 8080
-CMD ["sh", "-c","go run ./cmd/server -static client/dist -addr :8080 "]
+CMD ["sh", "-c","go run ./cmd/server -static client/dist -addr :8080"]
