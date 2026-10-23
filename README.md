@@ -10,7 +10,7 @@ Built for native VoIP media, multi-account (multi-session) operation, and a mode
 [![whatsmeow](https://img.shields.io/badge/whatsmeow-VoIP-25D366?logo=whatsapp&logoColor=white)](https://github.com/tulir/whatsmeow)
 [![pion](https://img.shields.io/badge/pion-WebRTC-FF6B6B)](https://github.com/pion/webrtc)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
-![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white)
+[![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white)](https://hub.docker.com/r/caedpaulofrossard/wacalls)
 
 [Overview](#overview) · [Architecture](#architecture) · [Quick Start](#quick-start) · [API](#api) · [Security](#security) · [Documentation](#documentation)
 
@@ -51,7 +51,8 @@ Simple version of the app in single docker file.
 
 Verions: Alpine and Debian
 
-[![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white)](https://hub.docker.com/repository/docker/caedpaulofrossard/wacalls/general) · [Dockerhub](https://hub.docker.com/repository/docker/caedpaulofrossard/wacalls/general)
+[![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white)](https://hub.docker.com/r/caedpaulofrossard/wacalls)
+
 
 **Quick run:**
 
@@ -67,7 +68,7 @@ Done!
 
 ## Fork data
 
-**Problems in original project and Reason for fork:**
+> Problems in original project and Reason for fork
 
 ### Problems in original project
 - Voice return in 20-30% of the calls in my tests;
@@ -94,7 +95,7 @@ Due legal rules and contract rules this fork it is necesary.
 ┌──────────────────────────── GO SERVER (cmd/server) ────────────────────────┐
 │  SessionManager   registry of accounts (client + CallManager + bridge)     │
 │  Broker           SSE hub (sessions, auth, call lifecycle fan-out)         │
-│  Bridge           pion WebRTC bridge (16 kHz PCM data channel ⇄ call core) │
+│  Bridge           pion WebRTC bridge (16 kHz PCM data channel ⇄ call core)│
 │                                                                            │
 │  internal/wa      VoipSocket adapter over whatsmeow                        │
 │  internal/voip    call · signaling · media · transport · core · wanode     │
