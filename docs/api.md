@@ -52,8 +52,12 @@ the expanded contract.
 |---|---|---|
 | `GET` | `/api/events` | One SSE channel for everything. Client id from `?clientId=` (the client uses this) or `X-Client-Id`. |
 
+> Optional `apiKey` query param (`GET /api/events?clientId=…&apiKey=…`) is
+> **forward-compatible and ignored until backend enforcement lands** (`EventSource`
+> cannot send headers; the REST counterpart is `Authorization: Bearer <apiKey>`).
+
 Payloads are JSON objects with a `type` discriminator (client union: `BrokerEvent` in
-`client/src/lib/event-stream.ts`):
+`client/src/types/broker.ts`):
 
 | `type` | Payload (main fields) | Meaning |
 |---|---|---|

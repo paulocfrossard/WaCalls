@@ -1,0 +1,155 @@
+<!doctype html>
+<!--
+  WaCalls × Chatwoot PoC (Ticket 7) — framework-free, no build step.
+
+  USAGE
+  1. Start the backend:            go run ./cmd/server   (listens on :8080 by default;
+                                   dev proxy uses -addr :3001 — adjust baseUrl below)
+  2. Serve the REPO ROOT (so ../sdk/dist/ resolves):
+                                     npx serve .            or: python3 -m http.server 8000
+  3. Open                            http://localhost:5000/examples/chatwoot-poc.html
+  WebRTC needs a secure context: use https or localhost (not a LAN IP).
+
+  Build the SDK first if sdk/dist/ is missing: cd sdk && npm install && npm run build
+-->
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WaCalls · Chatwoot PoC</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.2rem; }
+    fieldset { border: 1px solid #8884; border-radius: 8px; margin-bottom: 1rem; }
+    label { display: inline-flex; flex-direction: column; gap: .2rem; font-size: .8rem; margin: .3rem .6rem .3rem 0; }
+    input { font: inherit; padding: .3rem .4rem; width: 14rem; }
+    .actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; }
+    button { font: inherit; padding: .45rem .9rem; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+    #log { height: 320px; overflow: auto; padding: .6rem; border: 1px solid #8884;
+           border-radius: 8px; font-size: .75rem; white-space: pre-wrap; word-break: break-word; }
+  </style>
+</head>
+<body>
+  <h1>WaCalls · Chatwoot PoC</h1>
+
+  <fieldset>
+    <legend>Configuração</legend>
+    <label>baseUrl <input id="baseUrl" value="http://localhost:8080" /></label>
+    <label>clientId <input id="clientId" value="chatwoot-poc" /></label>
+    <label>apiKey (opcional) <input id="apiKey" type="password" placeholder="vazio = sem auth" /></label>
+    <label>sessionId <input id="sessionId" placeholder="id de GET /api/sessions" /></label>
+    <label>phone <input id="phone" placeholder="5511999999999" /></label>
+  </fieldset>
+
+  <div class="actions">
+    <button id="btnSse">Conectar SSE</button>
+    <button id="btnCall">Ligar</button>
+    <button id="btnHangup">Desligar</button>
+    <button id="btnMute">Mutar</button>
+    <span id="status" role="status">SSE: desconectado · chamada: —</span>
+  </div>
+
+  <pre id="log" aria-label="SDK event log"></pre>
+
+  <!-- INTEGRAÇÃO 1: carrega o bundle IIFE → global window.WaCallsSDK -->
+  <script src="../sdk/dist/index.global.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    /* Log on-page (com timestamp) + console — apenas para observabilidade do PoC. */
+    function log(event, payload) {
+      const ts = new Date().toISOString().slice(11, 23);
+      const line = `${ts}  ${event.padEnd(14)} ${JSON.stringify(payload)}`;
+      console.log(line);
+      const el = $("log");
+      el.textContent += line + "\n";
+      el.scrollTop = el.scrollHeight;
+    }
+
+    /* INTEGRAÇÃO 2: um único WaCallsClient por página, criado a partir do painel.
+       (Edite a config antes do primeiro clique; recarregue para recriar.) */
+    let client = null;
+    let sseWanted = false;
+    const refreshStatus = () => {
+      $("status").textContent =
+        `SSE: ${sseWanted ? "conectado" : "desconectado"} · chamada: ${client?.activeCallId ?? "—"}`;
+    };
+
+    function ensureClient() {
+      if (client) return client;
+      client = new WaCallsSDK.WaCallsClient({
+        baseUrl: $("baseUrl").value.trim(),
+        clientId: $("clientId").value.trim(),
+        apiKey: $("apiKey").value.trim() || undefined,
+      });
+      /* INTEGRAÇÃO 3: assina todos os eventos do SDK — broker:event entrega os
+         frames SSE "cruos" (session-list, auth-state, session-qr, call-list…),
+         os demais são os tipados (incoming/status/ended/error). */
+      for (const ev of ["call:incoming", "call:status", "call:ended", "error", "broker:event"]) {
+        client.on(ev, (payload) => { log(ev, payload); refreshStatus(); });
+      }
+      log("sdk:ready", { clientId: $("clientId").value.trim() });
+      refreshStatus();
+      return client;
+    }
+
+    /* INTEGRAÇÃO 4: toda ação de chamada roda DENTRO do clique (user gesture) —
+       o SDK cria o AudioContext/RTCPeerConnection em startCall/answerCall e o
+       navegador só permite resume() com gesture ativo. */
+    $("btnCall").onclick = async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        const c = ensureClient();
+        c.connect(); // idempotente: abre/reusa o único EventSource
+        sseWanted = true;
+        $("btnSse").textContent = "Desconectar SSE";
+        await c.startCall($("sessionId").value.trim(), $("phone").value.trim());
+        log("action", { call: "start", activeCallId: c.activeCallId });
+        muted = false; $("btnMute").textContent = "Mutar";
+        refreshStatus();
+      } catch (err) {
+        log("error", { message: String(err) });
+      } finally {
+        btn.disabled = false;
+      }
+    };
+
+    $("btnHangup").onclick = async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        if (!client?.activeCallId) return log("action", { call: "hangup", skipped: "no active call" });
+        await client.hangup($("sessionId").value.trim(), client.activeCallId);
+        log("action", { call: "hangup" });
+        refreshStatus();
+      } catch (err) {
+        log("error", { message: String(err) });
+      } finally {
+        btn.disabled = false;
+      }
+    };
+
+    let muted = false;
+    $("btnMute").onclick = () => {
+      if (!client) return log("action", { mute: "skipped", reason: "no client" });
+      muted = !muted;
+      client.toggleMute(muted);
+      $("btnMute").textContent = muted ? "Desmutar" : "Mutar";
+      log("action", { mute: muted });
+    };
+
+    $("btnSse").onclick = () => {
+      const c = ensureClient();
+      const connecting = !sseWanted;
+      if (connecting) { c.connect(); log("action", { sse: "connect" }); }
+      else { c.disconnect(); log("action", { sse: "disconnect" }); }
+      sseWanted = connecting;
+      $("btnSse").textContent = connecting ? "Desconectar SSE" : "Conectar SSE";
+      refreshStatus();
+    };
+  </script>
+</body>
+</html>
