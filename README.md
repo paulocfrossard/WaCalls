@@ -221,6 +221,7 @@ go run ./cmd/server -static client/dist -addr :8080
 | `-debug-log` | `true` | Emit audio diagnostic events to the ring behind `GET /api/debug/logs` |
 | `-max-calls-per-session` | `8` | Max concurrent calls per session (`0` = unlimited) |
 | `-srtp-auth` | `true` | Verify the SRTP HMAC tag on receive (`false` = legacy no-verify) |
+| `-webhook-allow-hosts` | `""` | Comma-separated hostnames webhooks may target (`""` = any host) |
 
 ---
 
@@ -243,6 +244,9 @@ originating `sessionId`.
 | `DELETE` | `/api/sessions/{sid}/calls/{id}` | End an active call |
 | `GET` | `/api/sessions/{sid}/history` | Recent call history (up to 50 records) |
 | `GET` | `/api/events` | Server-sent events (sessions, auth, call lifecycle) |
+| `POST` | `/api/webhooks` | Register an outbound webhook (`{ url, secret, events? }`) |
+| `GET` | `/api/webhooks` | List registered webhooks (secret omitted) |
+| `DELETE` | `/api/webhooks/{id}` | Remove a webhook |
 | `GET` | `/api/debug/logs` | In-memory diagnostic ring (`?since=&limit=`, limit cap 500) |
 
 ---

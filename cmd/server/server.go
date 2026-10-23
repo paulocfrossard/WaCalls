@@ -13,8 +13,13 @@ import (
 type server struct {
 	broker    *Broker
 	sessions  *SessionManager
+	webhooks  *webhookStore
 	log       *slog.Logger
 	staticDir string
+
+	// webhookAllowHosts, when non-empty, restricts webhook registration and
+	// delivery to these exact hostnames (case-insensitive, any port).
+	webhookAllowHosts []string
 }
 
 func openDB(dbPath string) (*sql.DB, error) {
@@ -27,7 +32,7 @@ func openDB(dbPath string) (*sql.DB, error) {
 	return db, nil
 }
 
-func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, log *slog.Logger) (*server, error) {
+func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, webhookAllowHosts []string, log *slog.Logger) (*server, error) {
 	db, err := openDB(dbPath)
 	if err != nil {
 		return nil, err
@@ -46,9 +51,17 @@ func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, log 
 		waLogger = waLog.Stdout("WA", "INFO", true)
 	}
 
+	whStore, err := newWebhookStore(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+
 	broker := NewBroker()
+	worker := newWebhookWorker(whStore, log, webhookAllowHosts)
+	broker.Dispatcher = worker
+	worker.Start(ctx, 5)
 	mgr := newSessionManager(ctx, container, broker, store, waLogger, log, maxCalls)
 	broker.SnapshotFn = mgr.snapshotEvents
 
-	return &server{broker: broker, sessions: mgr, log: log, staticDir: staticDir}, nil
+	return &server{broker: broker, sessions: mgr, webhooks: whStore, log: log, staticDir: staticDir, webhookAllowHosts: webhookAllowHosts}, nil
 }
