@@ -1,12 +1,12 @@
 import { useMutation } from "@tanstack/react-query";
-import { rejectCall } from "@/services/calls";
+import { sdkClient } from "@/lib/sdk-client";
 import { clearIncoming } from "@/stores/calls";
 
 export const useRejectCall = () =>
   useMutation({
     mutationFn: async (vars: { sid: string; callId: string }) => {
       try {
-        await rejectCall(vars.sid, vars.callId);
+        await sdkClient.rejectCall(vars.sid, vars.callId);
       } catch {}
     },
     onSettled: () => clearIncoming(),

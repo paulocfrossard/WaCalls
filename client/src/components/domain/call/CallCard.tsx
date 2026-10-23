@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Headphones, PhoneOff } from "lucide-react";
+import { Headphones, Mic, PhoneOff } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,9 +9,10 @@ import {
   setDownlinkMonitorSink,
   startDownlinkMonitor,
   stopDownlinkMonitor,
-} from "@/lib/webrtc";
+} from "wacalls-sdk";
 import { debugLog, errFields } from "@/lib/debug-log";
-import { useCalls } from "@/stores/calls";
+import { sdkClient } from "@/lib/sdk-client";
+import { useSdkCallFor } from "@/hooks/useSdkCall";
 import { useDevices } from "@/stores/devices";
 import { useEndCall } from "@/hooks/useEndCall";
 import { formatCallDuration } from "@/utils/format";
@@ -44,6 +45,7 @@ const PEAK_HOLD_MS = 700; // peak-hold marker
 const PEAK_FALL_S = 0.5; // ...then falls back over ~500 ms
 const TEXT_EVERY_MS = 100; // numeric readout throttling (tracks the bar)
 const PALETTE_EVERY_MS = 1000; // re-read CSS vars (theme flips)
+const METER_DRAW_MS = 33; // ~30fps: skip analyser reads + canvas work above this
 const SEG_W = 3; // LED segment width (CSS px)
 const SEG_GAP = 2; // gap between segments
 const BAR_H = 14; // LED bar height inside the lane
@@ -169,7 +171,8 @@ const drawMeter = (
   g.fill();
   g.globalAlpha = 1;
 
-  // 2) LED scale: unlit track first, then the lit portion
+  // 2) LED scale: unlit track first, then the lit portion — one fillStyle per
+  // color run (base/warn/clip) instead of per segment (≤4 state changes).
   const barY = Math.round((h - BAR_H) / 2);
   const segs = Math.max(1, Math.floor((w + SEG_GAP) / (SEG_W + SEG_GAP)));
   g.fillStyle = base;
@@ -177,17 +180,23 @@ const drawMeter = (
   for (let i = 0; i < segs; i += 1) g.fillRect(i * (SEG_W + SEG_GAP), barY, SEG_W, BAR_H);
   g.globalAlpha = 1;
 
-  const colorAt = (p: number): string =>
-    p > 0.88 ? pal.clip : p > 0.7 ? pal.warn : base;
   const pos = Math.max(0, Math.min(segs, m.level * segs));
   const whole = Math.floor(pos);
-  for (let i = 0; i < whole; i += 1) {
-    g.fillStyle = colorAt((i + 1) / segs);
-    g.fillRect(i * (SEG_W + SEG_GAP), barY, SEG_W, BAR_H);
-  }
+  // (i + 1) / segs > threshold  ⇔  i >= floor(threshold * segs)
+  const warnFrom = Math.floor(0.7 * segs);
+  const clipFrom = Math.floor(0.88 * segs);
+  const drawRun = (from: number, to: number, color: string): void => {
+    if (to <= from) return;
+    g.fillStyle = color;
+    for (let i = from; i < to; i += 1) g.fillRect(i * (SEG_W + SEG_GAP), barY, SEG_W, BAR_H);
+  };
+  drawRun(0, Math.min(whole, warnFrom), base);
+  drawRun(warnFrom, Math.min(whole, clipFrom), pal.warn);
+  drawRun(Math.min(clipFrom, whole), whole, pal.clip);
   const frac = pos - whole;
   if (frac > 0 && whole < segs) {
-    g.fillStyle = colorAt((whole + 1) / segs);
+    const fp = (whole + 1) / segs;
+    g.fillStyle = fp > 0.88 ? pal.clip : fp > 0.7 ? pal.warn : base;
     g.fillRect(whole * (SEG_W + SEG_GAP), barY, Math.max(1, Math.round(SEG_W * frac)), BAR_H);
   }
 
@@ -230,13 +239,14 @@ const MeterRow = ({ label, tone, canvasRef, textRef }: MeterRowProps) => (
 );
 
 export const CallCard = ({ call }: { call: CallSummary }) => {
-  const conn = useCalls((s) => s.ownConnections.get(call.callId));
+  // SDK owns the RTCPeerConnection + playback; this hook exposes its handle.
+  const conn = useSdkCallFor(call.callId);
   const outDeviceId = useDevices((s) => s.outId);
   const endCall = useEndCall();
   const [, force] = useState(0);
+  const [muted, setMuted] = useState(false);
   const [monitorWanted, setMonitorWanted] = useState(false);
   const aliveRef = useRef(true);
-  const audioRef = useRef<HTMLAudioElement>(null);
   const micCanvasRef = useRef<HTMLCanvasElement>(null);
   const peerCanvasRef = useRef<HTMLCanvasElement>(null);
   const micTextRef = useRef<HTMLSpanElement>(null);
@@ -251,6 +261,15 @@ export const CallCard = ({ call }: { call: CallSummary }) => {
     return () => clearInterval(t);
   }, []);
 
+  // Mute: local state is only an optimistic render cache — the SDK's desired
+  // mute state (sdkClient.isMuted) is the source of truth. It survives call
+  // changes and is applied to freshly opened mics, so we reconcile from the
+  // getter on call change and after every toggle (the toggle can no-op while
+  // the media is still opening; the getter never lies).
+  useEffect(() => {
+    setMuted(sdkClient.isMuted);
+  }, [call.callId]);
+
   // Never leak a running monitor past this card (unmount / call ended).
   useEffect(() => {
     aliveRef.current = true;
@@ -261,29 +280,17 @@ export const CallCard = ({ call }: { call: CallSummary }) => {
     };
   }, [call.callId]);
 
-  // Wire the downlink to the primary <audio> once both exist.
-  useEffect(() => {
-    if (!conn) return;
-    const wait = setInterval(() => {
-      if (conn.remoteStream && audioRef.current) {
-        audioRef.current.srcObject = conn.remoteStream;
-        audioRef.current.play().catch(() => {});
-        clearInterval(wait);
-      }
-    }, 200);
-    return () => clearInterval(wait);
-  }, [conn]);
-
   // Field instrumentation: mic track + playback state every ~2 s while the
   // call is up (settings can change mid-call; the one-shot gum log at open
-  // can't see it). Cleans up on unmount / call end (conn goes away).
+  // can't see it). Cleans up on unmount / call end (conn goes away). The
+  // primary downlink <audio> is owned by the SDK (activeAudio).
   useEffect(() => {
     if (!conn) return;
     const id = call.callId;
     const tick = setInterval(() => {
       const track = conn.micStream?.getAudioTracks()[0] ?? null;
       const s = track?.getSettings();
-      const el = audioRef.current as (HTMLAudioElement & { sinkId?: string }) | null;
+      const el = sdkClient.activeAudio as (HTMLAudioElement & { sinkId?: string }) | null;
       debugLog("client:track", "debug", "track state", {
         callId: id,
         track: track
@@ -363,6 +370,10 @@ export const CallCard = ({ call }: { call: CallSummary }) => {
     const frame = (t: number) => {
       raf = requestAnimationFrame(frame);
       if (document.hidden) return; // idle while the tab is hidden
+      // ~30fps cap: skip the whole channel loop (analyser reads, RMS, canvas)
+      // between draws. `last` only advances on drawn frames, so `dt` below
+      // spans the skipped frames and the ballistics stay time-based (clamped).
+      if (last >= 0 && t - last < METER_DRAW_MS) return;
       const dt = last < 0 ? 0 : Math.min(0.1, (t - last) / 1000);
       last = t;
       if (t - palAt >= PALETTE_EVERY_MS) {
@@ -434,33 +445,11 @@ export const CallCard = ({ call }: { call: CallSummary }) => {
   }, [conn]);
 
   useEffect(() => {
-    const el = audioRef.current as (HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }) | null;
-    if (el && outDeviceId) {
-      if (typeof el.setSinkId === "function") {
-        el.setSinkId(outDeviceId)
-          .then(() =>
-            debugLog("sink", "info", "setSinkId applied (primary audio)", {
-              callId: call.callId,
-              sinkId: outDeviceId,
-            }),
-          )
-          .catch((err: unknown) =>
-            debugLog("sink", "warn", "setSinkId failed (primary audio)", {
-              callId: call.callId,
-              sinkId: outDeviceId,
-              ...errFields(err),
-            }),
-          );
-      } else {
-        debugLog("sink", "warn", "setSinkId unsupported (primary audio)", {
-          callId: call.callId,
-          sinkId: outDeviceId,
-        });
-      }
-    }
+    // The SDK owns the primary downlink <audio>: it applies outId on open and
+    // re-routes live via sdkClient.setOutId (devices store subscription).
     // Keep the monitor on the same output device as the primary audio.
     if (isDownlinkMonitorActive(call.callId)) void setDownlinkMonitorSink(outDeviceId);
-  }, [outDeviceId, conn, call.callId]);
+  }, [outDeviceId, call.callId]);
 
   const toggleMonitor = () => {
     if (!conn?.remoteStream) return;
@@ -470,14 +459,23 @@ export const CallCard = ({ call }: { call: CallSummary }) => {
       return;
     }
     setMonitorWanted(true);
+    // primary: the SDK's internal playback element — the monitor mutes it
+    // while active (single-renderer rule, no comb-filter double playback).
     void startDownlinkMonitor(call.callId, conn, {
       sinkId: outDeviceId,
-      primary: audioRef.current,
+      primary: sdkClient.activeAudio,
     }).then((ok) => {
       if (ok && aliveRef.current) return;
       stopDownlinkMonitor(call.callId);
       setMonitorWanted(false);
     });
+  };
+
+  const toggleMute = () => {
+    const next = !muted;
+    setMuted(next); // optimistic — reconciled immediately below
+    sdkClient.toggleMute(next);
+    setMuted(sdkClient.isMuted); // SDK is the source of truth
   };
 
   return (
@@ -511,6 +509,21 @@ export const CallCard = ({ call }: { call: CallSummary }) => {
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
+                  variant={muted ? "secondary" : "outline"}
+                  size="icon"
+                  onClick={toggleMute}
+                  disabled={!conn}
+                  aria-label={muted ? "Unmute microphone" : "Mute microphone"}
+                  aria-pressed={muted}
+                >
+                  <Mic className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{muted ? "Unmute microphone" : "Mute microphone"}</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
                   variant="destructive"
                   size="icon"
                   onClick={() => endCall.mutate({ sid: call.sessionId, callId: call.callId })}
@@ -532,7 +545,6 @@ export const CallCard = ({ call }: { call: CallSummary }) => {
           <MeterRow label="Mic" tone="in" canvasRef={micCanvasRef} textRef={micTextRef} />
           <MeterRow label="Peer" tone="out" canvasRef={peerCanvasRef} textRef={peerTextRef} />
         </div>
-        <audio ref={audioRef} autoPlay />
       </CardContent>
     </Card>
   );

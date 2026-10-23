@@ -3,7 +3,6 @@ import { Phone, PhoneIncoming, PhoneOff } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useCalls } from "@/stores/calls";
-import { useDevices } from "@/stores/devices";
 import { useAcceptCall } from "@/hooks/useAcceptCall";
 import { useRejectCall } from "@/hooks/useRejectCall";
 
@@ -50,8 +49,7 @@ const startRingLoop = (): RingHandle | null => {
 
 export const IncomingCallModal = () => {
   const incoming = useCalls((s) => s.incoming);
-  const micId = useDevices((s) => s.micId);
-  const accept = useAcceptCall(micId);
+  const accept = useAcceptCall();
   const reject = useRejectCall();
   const busy = accept.isPending || reject.isPending;
 
