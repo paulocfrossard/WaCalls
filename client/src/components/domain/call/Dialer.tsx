@@ -5,13 +5,11 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { DeviceSelector } from "@/components/form/DeviceSelector";
 import { useStartCall } from "@/hooks/useStartCall";
-import { useDevices } from "@/stores/devices";
 
 export const Dialer = ({ sid }: { sid: string }) => {
   const [phone, setPhone] = useState("");
   const [record, setRecord] = useState(false);
-  const micId = useDevices((s) => s.micId);
-  const startCall = useStartCall(sid, micId);
+  const startCall = useStartCall(sid);
 
   const submit = () => {
     if (!phone.trim() || startCall.isPending) return;

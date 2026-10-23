@@ -1,6 +1,6 @@
 import { create } from "zustand";
-import { eventStream, type BrokerEvent } from "@/lib/event-stream";
-import { getClientId } from "@/lib/client-id";
+import { sdkClient } from "@/lib/sdk-client";
+import { asBrokerEvent } from "@/types/broker";
 import { listSessions } from "@/services/sessions";
 import type { SessionInfo } from "@/types/session";
 
@@ -23,13 +23,17 @@ let wired = false;
 export const ensureSessionsWired = (): void => {
   if (wired) return;
   wired = true;
-  eventStream.connect(getClientId());
+  // The SDK owns the single EventSource (auto-reconnecting until disconnect()).
+  sdkClient.connect();
 
   void listSessions()
     .then((sessions) => useSessions.setState((s) => ({ sessions, activeId: pickActive(sessions, s.activeId) })))
     .catch(() => {});
 
-  eventStream.on((ev: BrokerEvent) => {
+  // Session frames ride the raw broker:event passthrough (the SDK types only
+  // call lifecycle events).
+  sdkClient.on("broker:event", (raw) => {
+    const ev = asBrokerEvent(raw);
     if (ev.type === "session-list") {
       useSessions.setState((s) => {
         const ids = new Set(ev.sessions.map((x) => x.id));

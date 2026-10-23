@@ -1,16 +1,14 @@
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { openCall } from "@/lib/webrtc";
-import { startCall } from "@/services/calls";
-import { registerOwnConnection } from "@/stores/calls";
+import { sdkClient } from "@/lib/sdk-client";
+import { notifySdkCallChanged } from "@/hooks/useSdkCall";
 
-export const useStartCall = (sid: string, micId: string | null) =>
+export const useStartCall = (sid: string) =>
   useMutation({
     mutationFn: async (vars: { phone: string; record: boolean }) => {
-      const { call } = await startCall(sid, vars.phone, vars.record);
-      const conn = await openCall(sid, call.callId, micId);
-      registerOwnConnection(call.callId, conn);
-      return call.callId;
+      // SDK: POST /calls + open media (WebRTC/PCM) in one user-gesture-safe step.
+      await sdkClient.startCall(sid, vars.phone, { record: vars.record });
+      notifySdkCallChanged();
     },
     onError: (e: Error) => {
       const m = e.message;
