@@ -19,6 +19,7 @@ outside the LAN.
 |---|---|---|
 | All `/api/*` routes | No auth, no rate limiting, CORS `Access-Control-Allow-Origin: *` | Create/delete sessions (WhatsApp accounts), place/receive/end calls, read call history and peer numbers |
 | `GET /api/events` (SSE) | No auth; needs a `clientId` (trivial to supply) | Real-time surveillance of session pairing, call lifecycle, peer metadata |
+| `POST/GET/DELETE /api/webhooks` | No auth (like all `/api`); lets any LAN caller register outbound webhook URLs | **Server-side request forgery (SSRF) egress**: the server will send signed POSTs to any http/https URL the caller supplies, including internal hosts (`http://10.x/...`), loopback services, and cloud metadata (`http://169.254.169.254/...`). Delivery is blind (no response body is echoed back to the API caller), so this is a side-effect/egress vector, not an exfiltration channel — but it can trigger internal actions and, if the receiver echoes data elsewhere, aid pivoting |
 | `GET /api/debug/logs` | No auth (`-debug-log`, default **on**) | Leak of call IDs, SSRCs, audio-level telemetry, ICE/DC states |
 | `GET /` static files | Only when `-static` dir exists | Low — serves the SPA bundle only |
 | `wacalls.db` (SQLite) | Filesystem | **WhatsApp session credentials (secrets).** Full account takeover of linked devices |
@@ -42,6 +43,36 @@ outside the LAN.
 End-to-end confidentiality against WhatsApp-relay operators is the platform's
 property, not something this server adds.
 
+## Webhook egress
+
+Webhook delivery is **blind by design**: the response body/headers are never
+echoed back to any API surface (the worker only logs status codes). An attacker
+who can reach `/api/webhooks` can register a URL and cause the server to send
+signed JSON POSTs to internal hosts, loopback services, or cloud metadata
+endpoints — but cannot read the responses through this channel.
+
+**Defaults:** by default any http/https host is allowed (receivers are
+typically on the same LAN or localhost, matching this repo's trust model).
+For hardened deployments, start the server with:
+
+```
+-webhook-allow-hosts chatwoot.local,internal-n8n.lan
+```
+
+This restricts both **registration** (create rejects foreign hosts with `400`)
+and **delivery** (worker re-validates and skips). Hostnames are matched
+case-insensitively; any port is allowed. IPv6 bracket notation (`[::1]`) is
+normalized when parsing the flag.
+
+**Residual risk:** with an empty allowlist, SSRF remains possible (any LAN
+caller can register `http://169.254.169.254/...`). DNS rebinding of an
+allowlisted hostname (resolving to an internal IP at delivery time) is out of
+scope — the worker does not resolve hosts, it only string-compares the
+hostname.
+
+**Never point webhooks at cloud metadata IPs** (`169.254.169.254`,
+`fd00:ec2::254`) or untrusted internal services.
+
 ## Data handling
 
 - **`wacalls.db`**: holds linked-account state. Gitignored (`*.db*`); never commit,
@@ -60,7 +91,8 @@ property, not something this server adds.
 3. Keep `-srtp-auth=true` (default). Only disable for a time-boxed legacy interop test.
 4. Consider `-debug-log=false` in shared environments to shrink telemetry exposure.
 5. Protect/backup `wacalls.db` as a secret; a leak = account takeover.
-6. Re-check this doc against `srtp.go` and `httpapi.go` when touching SRTP or route
+6. Set `-webhook-allow-hosts` to the exact receiver hostname(s) if webhooks are used — otherwise any LAN caller can point webhooks at internal/metadata targets.
+7. Re-check this doc against `srtp.go` and `httpapi.go` when touching SRTP or route
    auth — the plan file (`implementacao.md` §1) tracks the SRTP hardening history.
 
 ## What this doc does not claim

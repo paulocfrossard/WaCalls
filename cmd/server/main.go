@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,9 +24,22 @@ func main() {
 	debugLog := flag.Bool("debug-log", true, "emit audio diagnostic events to the in-memory ring served at GET /api/debug/logs")
 	maxCalls := flag.Int("max-calls-per-session", 8, "max concurrent calls per session (0 = unlimited)")
 	authSRTP := flag.Bool("srtp-auth", true, "verify SRTP HMAC tag on receive (legacy: false)")
+	webhookAllowHosts := flag.String("webhook-allow-hosts", "", "comma-separated hostnames webhooks may target (empty = any host)")
 	flag.Parse()
 	media.SetAuthVerify(*authSRTP)
 	logbuf.SetEnabled(*debugLog)
+
+	var allowHosts []string
+	for _, h := range strings.Split(*webhookAllowHosts, ",") {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		// Strip IPv6 brackets so entries compare equal to url.Hostname().
+		h = strings.TrimPrefix(h, "[")
+		h = strings.TrimSuffix(h, "]")
+		allowHosts = append(allowHosts, h)
+	}
 
 	level := slog.LevelInfo
 	if *debug {
@@ -41,7 +55,7 @@ func main() {
 	// writes for the same call land <50ms apart = duplicated audio path.
 	go logbuf.StartDupDetector(ctx)
 
-	srv, err := newServer(ctx, *dbPath, *staticDir, *maxCalls, log)
+	srv, err := newServer(ctx, *dbPath, *staticDir, *maxCalls, allowHosts, log)
 	if err != nil {
 		log.Error("startup failed", "err", err)
 		os.Exit(1)

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"strconv"
@@ -30,6 +32,13 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{sid}/history", s.handleHistory)
 
 	mux.HandleFunc("GET /api/events", s.handleEvents)
+
+	// Webhook management (outbound HTTP POST notifications). Same trust model
+	// as the rest of /api: no auth, LAN-facing. The payload itself is HMAC-
+	// signed so external receivers can verify authenticity — see docs/api.md.
+	mux.HandleFunc("POST /api/webhooks", s.handleWebhookCreate)
+	mux.HandleFunc("GET /api/webhooks", s.handleWebhookList)
+	mux.HandleFunc("DELETE /api/webhooks/{id}", s.handleWebhookDelete)
 
 	// Debug log ring (fed by logbuf; toggle with -debug-log). Same trust
 	// model as the rest of /api: no auth, LAN-facing — see handleDebugLogs.
@@ -80,6 +89,97 @@ func (s *server) sessionByID(w http.ResponseWriter, sid string) *Session {
 
 func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	s.broker.serveSSE(w, r, clientID(r))
+}
+
+// handleWebhookCreate registers an outbound webhook endpoint.
+//
+//	POST /api/webhooks {"url": "...", "secret": "...", "events": ["incoming", "call-ended"]}
+//	→ 201 {"id": "..."}
+//
+// An empty or omitted "events" list subscribes the webhook to every event.
+// Each event name must be one of the allowlisted types (incoming, call-status,
+// call-ended); unknown or empty names are rejected with 400.
+func (s *server) handleWebhookCreate(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var body struct {
+		URL    string   `json:"url"`
+		Secret string   `json:"secret"`
+		Events []string `json:"events"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	body.URL = strings.TrimSpace(body.URL)
+	if err := validateWebhookURL(body.URL, s.webhookAllowHosts); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	body.Secret = strings.TrimSpace(body.Secret)
+	if body.Secret == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "secret required"})
+		return
+	}
+	// Normalize and validate the events list against the allowlist.
+	normalized := make([]string, 0, len(body.Events))
+	for _, e := range body.Events {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "empty event name"})
+			return
+		}
+		if !webhookEvents[e] {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown event: " + e})
+			return
+		}
+		normalized = append(normalized, e)
+	}
+	id, err := s.webhooks.Create(r.Context(), body.URL, body.Secret, normalized)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
+}
+
+// handleWebhookList returns all registered webhooks. The secret is intentionally
+// omitted: it is write-only (used to HMAC-sign outbound payloads).
+func (s *server) handleWebhookList(w http.ResponseWriter, r *http.Request) {
+	hooks, err := s.webhooks.List(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	type view struct {
+		ID        string    `json:"id"`
+		URL       string    `json:"url"`
+		Events    []string  `json:"events"`
+		CreatedAt time.Time `json:"createdAt"`
+	}
+	out := make([]view, 0, len(hooks))
+	for _, h := range hooks {
+		events := h.Events
+		if events == nil {
+			events = []string{}
+		}
+		out = append(out, view{ID: h.ID, URL: h.URL, Events: events, CreatedAt: h.CreatedAt})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"webhooks": out})
+}
+
+// handleWebhookDelete removes a webhook by id.
+//
+//	DELETE /api/webhooks/{id} → 204 | 404 | 500
+func (s *server) handleWebhookDelete(w http.ResponseWriter, r *http.Request) {
+	if err := s.webhooks.Delete(r.Context(), r.PathValue("id")); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such webhook"})
+		} else {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleDebugLogs serves the in-memory diagnostic ring for the front-end logs

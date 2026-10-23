@@ -54,6 +54,10 @@ type Broker struct {
 	history []CallRecord
 
 	SnapshotFn func() []any
+
+	// Dispatcher, when non-nil, receives every broadcast event for outbound
+	// webhook delivery (Phase B). Dispatch must be non-blocking.
+	Dispatcher EventDispatcher
 }
 
 func NewBroker() *Broker {
@@ -82,6 +86,13 @@ func (b *Broker) broadcast(ev any) {
 	data, err := json.Marshal(ev)
 	if err != nil {
 		return
+	}
+	if b.Dispatcher != nil {
+		if m, ok := ev.(map[string]any); ok {
+			if t, ok := m["type"].(string); ok {
+				b.Dispatcher.Dispatch(t, ev)
+			}
+		}
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -116,7 +127,7 @@ func (b *Broker) upsertCall(r CallRecord) {
 	b.broadcastCallList()
 	b.broadcast(map[string]any{
 		"type": "call-status", "sessionId": r.SessionID, "id": r.CallID, "owner": r.Owner,
-		"status": r.Status, "peer": r.Peer, "startedAt": r.StartedAt,
+		"status": r.Status, "peer": r.Peer, "direction": r.Direction, "startedAt": r.StartedAt,
 	})
 }
 
@@ -175,10 +186,13 @@ func (b *Broker) endCall(id, reason string) {
 	b.history = append(b.history, ended)
 	owner := c.Owner
 	sessionID := c.SessionID
+	peer := ended.Peer
+	direction := ended.Direction
 	b.mu.Unlock()
 
 	b.broadcast(map[string]any{
-		"type": "call-ended", "sessionId": sessionID, "id": id, "owner": owner, "reason": reason, "endedAt": now,
+		"type": "call-ended", "sessionId": sessionID, "id": id, "owner": owner,
+		"peer": peer, "direction": direction, "reason": reason, "endedAt": now,
 	})
 	b.broadcastCallList()
 }
