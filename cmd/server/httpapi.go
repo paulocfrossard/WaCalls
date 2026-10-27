@@ -296,7 +296,10 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) doStartCall(sess *Session, w http.ResponseWriter, r *http.Request) {
-	if sess.client.Store.ID == nil {
+	sess.mu.Lock()
+	client := sess.client
+	sess.mu.Unlock()
+	if client.Store.ID == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not paired"})
 		return
 	}
