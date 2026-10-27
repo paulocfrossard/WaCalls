@@ -76,10 +76,7 @@ sessions while removing the volume does not.
 
 > **Warning:** **Never build from a working directory that contains `wacalls.db`** —
 > that file holds the WhatsApp device credentials, and the image build would package
-> them. Build from `git archive HEAD` as shown above, and see
-> [Container image hygiene](./docs/security.md#container-image-hygiene). Images
-> published before the `.dockerignore`/multi-stage change must be treated as
-> compromised.
+> them. Build from `git archive HEAD` as shown above.
 
 ---
 
