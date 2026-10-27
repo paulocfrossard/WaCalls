@@ -469,6 +469,7 @@ func (s *Session) startPairing(ctx context.Context) error {
 		s.endPairing(gen)
 		return err
 	}
+	s.log.Info("pairing channel opened; waiting for QR code")
 	go func() {
 		defer s.endPairing(gen)
 		terminal := false
@@ -480,6 +481,7 @@ func (s *Session) startPairing(ctx context.Context) error {
 				s.setAuth(AuthSnapshot{State: "qr", QR: evt.Code})
 				s.mgr.broker.emitSessionQR(s.id, evt.Code)
 			case "success":
+				s.log.Info("pairing succeeded")
 				if client.Store != nil {
 					if id := client.Store.ID; id != nil {
 						_ = s.mgr.store.setJID(s.mgr.appCtx, s.id, id.String())
@@ -488,10 +490,23 @@ func (s *Session) startPairing(ctx context.Context) error {
 				s.setAuth(AuthSnapshot{State: "open", Paired: true})
 				terminal = true
 			case "timeout":
+				s.log.Warn("pairing timed out; no QR scanned")
 				// Disable auto-reconnect + disconnect before publishing the
 				// terminal state, so the slot is not left armed/connected
 				// (LOW-1). stopReconnect acquires connMu; this goroutine is
 				// not holding it, so it is safe to call here.
+				s.stopReconnect()
+				s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
+				terminal = true
+			default:
+				attrs := []any{"event", evt.Event}
+				if evt.Error != nil {
+					attrs = append(attrs, "err", evt.Error)
+				}
+				s.log.Error("pairing ended before a QR code was issued", attrs...)
+				if evt.Event == "err-client-outdated" {
+					s.log.Error("whatsapp rejected this client version (405): update whatsmeow or set a fresh version via store.SetWAVersion")
+				}
 				s.stopReconnect()
 				s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
 				terminal = true
