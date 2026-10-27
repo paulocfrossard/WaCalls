@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -222,7 +223,10 @@ func (s *server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name string `json:"name"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
 	name := strings.TrimSpace(body.Name)
 	if name == "" {
 		name = "Session"
@@ -236,8 +240,12 @@ func (s *server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
-	if err := s.sessions.Delete(r.Context(), r.PathValue("sid")); err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+	sid := r.PathValue("sid")
+	if s.sessionByID(w, sid) == nil {
+		return
+	}
+	if err := s.sessions.Delete(r.Context(), sid); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -252,7 +260,11 @@ func (s *server) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleSessionPair(w http.ResponseWriter, r *http.Request) {
-	if err := s.sessions.Pair(r.PathValue("sid")); err != nil {
+	sid := r.PathValue("sid")
+	if s.sessionByID(w, sid) == nil {
+		return
+	}
+	if err := s.sessions.Pair(sid); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
