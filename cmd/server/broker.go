@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -60,6 +61,10 @@ type Broker struct {
 	snapshot      []any
 	snapshotDirty bool
 
+	// computeMu serializes SnapshotFn computation to avoid double-compute
+	// under contention.
+	computeMu sync.Mutex
+
 	// Dispatcher, when non-nil, receives every broadcast event for outbound
 	// webhook delivery (Phase B). Dispatch must be non-blocking.
 	Dispatcher EventDispatcher
@@ -74,7 +79,7 @@ func NewBroker() *Broker {
 }
 
 func (b *Broker) subscribe(clientID string) *subscriber {
-	s := &subscriber{clientID: clientID, ch: make(chan []byte, 32)}
+	s := &subscriber{clientID: clientID, ch: make(chan []byte, 128)}
 	b.mu.Lock()
 	b.subs[s] = struct{}{}
 	b.mu.Unlock()
@@ -106,6 +111,7 @@ func (b *Broker) broadcast(ev any) {
 		select {
 		case s.ch <- data:
 		default:
+			slog.Default().Warn("dropped broadcast frame", "subscriber", s.clientID)
 		}
 	}
 }
@@ -248,26 +254,43 @@ func (b *Broker) historyRows(sessionID string, limit int) []CallRecord {
 func (b *Broker) Snapshot() []any {
 	b.snapshotMu.RLock()
 	if !b.snapshotDirty && b.snapshot != nil {
-		out := b.snapshot
+		out := append([]any(nil), b.snapshot...)
 		b.snapshotMu.RUnlock()
 		return out
 	}
 	b.snapshotMu.RUnlock()
 
+	// Serialize computation to avoid double SnapshotFn calls under contention.
+	b.computeMu.Lock()
+	defer b.computeMu.Unlock()
+
+	// Re-check cache after acquiring computeMu.
+	b.snapshotMu.RLock()
+	if !b.snapshotDirty && b.snapshot != nil {
+		out := append([]any(nil), b.snapshot...)
+		b.snapshotMu.RUnlock()
+		return out
+	}
+	b.snapshotMu.RUnlock()
+
+	// Compute outside snapshotMu so invalidations aren't blocked (M4).
+	var evs []any
+	if b.SnapshotFn != nil {
+		evs = b.SnapshotFn()
+	}
+
 	b.snapshotMu.Lock()
 	defer b.snapshotMu.Unlock()
+	// Re-check: another goroutine may have recomputed while we were unlocked.
 	if !b.snapshotDirty && b.snapshot != nil {
-		return b.snapshot
+		return append([]any(nil), b.snapshot...)
 	}
-	if b.SnapshotFn == nil {
-		b.snapshot = nil
-		b.snapshotDirty = false
-		return nil
-	}
-	evs := b.SnapshotFn()
 	b.snapshot = evs
 	b.snapshotDirty = false
-	return evs
+	if evs == nil {
+		return nil
+	}
+	return append([]any(nil), evs...)
 }
 
 // invalidateSnapshot marks the cached SSE snapshot stale.
@@ -297,7 +320,15 @@ func (b *Broker) serveSSE(w http.ResponseWriter, r *http.Request, clientID strin
 			writeSSE(w, flusher, ev)
 		}
 	}
-	b.broadcastCallList()
+	// Send the current call list only to this new subscriber instead of
+	// broadcasting to all subscribers (avoids O(subs) per connect).
+	b.mu.RLock()
+	list := make([]CallRecord, 0, len(b.calls))
+	for _, c := range b.calls {
+		list = append(list, *c)
+	}
+	b.mu.RUnlock()
+	writeSSE(w, flusher, map[string]any{"type": "call-list", "calls": list})
 
 	keepalive := time.NewTicker(20 * time.Second)
 	defer keepalive.Stop()
