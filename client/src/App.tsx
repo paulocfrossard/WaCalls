@@ -41,7 +41,7 @@ export const App = () => {
         ) : active ? (
           <div className="space-y-6">
             <SessionHeader session={active} />
-            {active.paired ? <CallsPage sid={active.id} /> : <SessionPairing session={active} />}
+            {active.state === "open" ? <CallsPage sid={active.id} /> : <SessionPairing session={active} />}
           </div>
         ) : (
           <EmptyState title="Select an account" description="Choose an account from the sidebar." />
