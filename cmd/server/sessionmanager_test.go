@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waAdv"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
@@ -45,6 +47,31 @@ func (m *SessionManager) addUnconnected(t *testing.T, name string) *Session {
 		t.Fatal(err)
 	}
 	client := whatsmeow.NewClient(m.container.NewDevice(), waLog.Noop)
+	s := newSession(m, id, name, client)
+	m.register(s)
+	return s
+}
+
+// addCredentialedSession registers a session whose in-memory client holds a
+// device ID (Store.ID != nil, i.e. "has credentials") and whose store row is
+// already flagged ever_paired with a persisted JID. The caller sets the auth
+// state that Pair()/handleEvent must react to.
+func addCredentialedSession(t *testing.T, m *SessionManager, name string) *Session {
+	t.Helper()
+	jid, err := types.ParseJID("15557654321@s.whatsapp.net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := m.container.NewDevice()
+	device.ID = &jid
+	client := whatsmeow.NewClient(device, waLog.Noop)
+	id := newSessionID()
+	if err := m.store.insert(m.appCtx, id, name); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.store.setJID(m.appCtx, id, jid.String()); err != nil {
+		t.Fatal(err)
+	}
 	s := newSession(m, id, name, client)
 	m.register(s)
 	return s
@@ -183,10 +210,14 @@ func TestRestoreUnscannedIsLoggedOut(t *testing.T) {
 	}
 }
 
-// TestRestoreStillDropsBrokenRows keeps the two legitimate drop paths intact:
-// an unparseable JID and a JID whose device material is gone.
+// TestRestoreStillDropsBrokenRows keeps the legitimate drop path intact: an
+// unparseable JID is corrupt state, not a recoverable logout, so the row is
+// still deleted. A missing device row is NOT corrupt state (WhatsApp deletes
+// devices on a 401 device_removed), so that row survives as logged_out.
 func TestRestoreStillDropsBrokenRows(t *testing.T) {
 	m := newTestManager(t)
+	blockOutboundWhatsApp(t)
+	t.Cleanup(m.disconnectAll)
 	ctx := context.Background()
 
 	badJID := newSessionID()
@@ -214,14 +245,71 @@ func TestRestoreStillDropsBrokenRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 0 {
-		t.Fatalf("broken rows must still be dropped, got %+v", rows)
+	if len(rows) != 1 || rows[0].ID != noDevice || rows[0].JID != "" {
+		t.Fatalf("only the missing-device row must survive (JID cleared), got %+v", rows)
 	}
 	if _, ok := m.Get(badJID); ok {
 		t.Fatal("session with unparseable jid must not be registered")
 	}
-	if _, ok := m.Get(noDevice); ok {
-		t.Fatal("session with missing device material must not be registered")
+	if _, ok := m.Get(noDevice); !ok {
+		t.Fatal("session with missing device material must survive as logged_out")
+	}
+}
+
+// TestRestoreMissingDeviceBecomesLoggedOut is the recovery guard: a session
+// whose device row was deleted (external/session logout) must come back as a
+// pairable logged_out session with no stale JID instead of vanishing.
+func TestRestoreMissingDeviceBecomesLoggedOut(t *testing.T) {
+	m := newTestManager(t)
+	blockOutboundWhatsApp(t)
+	t.Cleanup(m.disconnectAll)
+	ctx := context.Background()
+
+	id := newSessionID()
+	if err := m.store.insert(ctx, id, "device removed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.store.setJID(ctx, id, "15559876543@s.whatsapp.net"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Restore(ctx); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	rows, err := m.store.list(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ID != id {
+		t.Fatalf("session row must survive Restore, got %+v", rows)
+	}
+	if rows[0].JID != "" {
+		t.Fatalf("stale JID must be cleared, got %q", rows[0].JID)
+	}
+
+	s, ok := m.Get(id)
+	if !ok {
+		t.Fatal("session must stay registered after Restore")
+	}
+	found := false
+	for _, info := range m.infos() {
+		if info.ID == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("sessions list must contain the restored session")
+	}
+	info := s.info()
+	if info.State != "logged_out" {
+		t.Fatalf("state = %q, want logged_out", info.State)
+	}
+	if info.Paired {
+		t.Fatal("restored session must report paired=false")
+	}
+	if info.JID != "" {
+		t.Fatalf("restored session must expose an empty JID, got %q", info.JID)
 	}
 }
 
@@ -445,5 +533,80 @@ func TestRestorePrunesOnlyUnscanned(t *testing.T) {
 	}
 	if len(rows) != 11 {
 		t.Fatalf("expected 11 total sessions, got %d", len(rows))
+	}
+}
+
+// TestPairAllowedForLoggedOutSession is the user-visible recovery guard: after
+// an EXTERNAL logout the session keeps Store.ID in memory but is `logged_out`,
+// so Reactivate must not be rejected as "already paired" — it must replace the
+// dead-credential client and try to open a fresh QR channel.
+func TestPairAllowedForLoggedOutSession(t *testing.T) {
+	m := newTestManager(t)
+	blockOutboundWhatsApp(t)
+	t.Cleanup(m.disconnectAll)
+
+	s := addCredentialedSession(t, m, "logged out")
+	s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
+
+	s.mu.Lock()
+	if s.client == nil || s.client.Store == nil || s.client.Store.ID == nil {
+		s.mu.Unlock()
+		t.Fatal("precondition: session must hold a device ID in memory")
+	}
+	oldClient := s.client
+	s.mu.Unlock()
+
+	err := m.Pair(s.id)
+	if err != nil && strings.Contains(err.Error(), "already paired") {
+		t.Fatalf("Pair on a logged_out session must allow recovery, got %v", err)
+	}
+
+	s.mu.Lock()
+	newClient := s.client
+	s.mu.Unlock()
+	if newClient == oldClient {
+		t.Fatal("Pair must replace the client holding dead credentials")
+	}
+	if newClient == nil || newClient.Store == nil || newClient.Store.ID != nil {
+		t.Fatal("replacement client must start with a fresh, ID-less device store")
+	}
+}
+
+func TestPairRejectedWhenOpen(t *testing.T) {
+	m := newTestManager(t)
+
+	s := addCredentialedSession(t, m, "open")
+	s.setAuth(AuthSnapshot{State: "open", Paired: true})
+
+	err := m.Pair(s.id)
+	if err == nil || !strings.Contains(err.Error(), "already paired") {
+		t.Fatalf("Pair on an open, credentialed session = %v, want already paired", err)
+	}
+}
+
+// TestLoggedOutClearsPersistedJID: an external logout must clear the persisted
+// JID (so a restart treats the session as unscanned) while ever_paired stays 1
+// and the session reports paired=false.
+func TestLoggedOutClearsPersistedJID(t *testing.T) {
+	m := newTestManager(t)
+
+	s := addCredentialedSession(t, m, "external logout")
+	s.handleEvent(&events.LoggedOut{})
+
+	rows, err := m.store.list(m.appCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ID != s.id {
+		t.Fatalf("expected the session row to survive, got %+v", rows)
+	}
+	if rows[0].JID != "" {
+		t.Fatalf("logged_out must clear the persisted JID, got %q", rows[0].JID)
+	}
+	if !rows[0].EverPaired {
+		t.Fatal("ever_paired must stay true after a logout")
+	}
+	if info := s.info(); info.State != "logged_out" || info.Paired {
+		t.Fatalf("info() = %+v, want logged_out with paired=false", info)
 	}
 }
