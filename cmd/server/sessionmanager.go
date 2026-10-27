@@ -23,9 +23,13 @@ type SessionManager struct {
 	log       *slog.Logger
 	maxCalls  int
 
-	mu       sync.RWMutex
-	sessions map[string]*Session
-	order    []string
+	mu sync.RWMutex
+	// sessions has no cap on paired sessions: paired/logged-out accounts are
+	// user-managed (created/deleted explicitly), so the only retention limit
+	// is maxUnscannedSessions for never-scanned rows. By design.
+	sessions  map[string]*Session
+	order     []string
+	restoring bool
 }
 
 func newSessionManager(ctx context.Context, container *sqlstore.Container, broker *Broker, store *sessionStore, waLogger waLog.Logger, log *slog.Logger, maxCalls int) *SessionManager {
@@ -58,6 +62,14 @@ func (m *SessionManager) unregister(id string) {
 		}
 	}
 	m.mu.Unlock()
+}
+
+// isRestoring reports whether Restore is in progress. Used by Session.setAuth
+// to suppress per-session broadcasts during boot (P2).
+func (m *SessionManager) isRestoring() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.restoring
 }
 
 func (m *SessionManager) Get(id string) (*Session, bool) {
@@ -137,6 +149,14 @@ func (m *SessionManager) snapshotEvents() []any {
 }
 
 func (m *SessionManager) Restore(ctx context.Context) error {
+	m.mu.Lock()
+	m.restoring = true
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		m.restoring = false
+		m.mu.Unlock()
+	}()
 	rows, err := m.store.list(ctx)
 	if err != nil {
 		return err
@@ -166,7 +186,13 @@ func (m *SessionManager) Restore(ctx context.Context) error {
 		}
 		rows = kept
 	}
+	unscannedRestored := make([]*Session, 0)
 	for _, row := range rows {
+		if _, ok := m.Get(row.ID); ok {
+			// Already registered (e.g. Restore called twice): skip to avoid
+			// duplicating m.order and leaking *Session.
+			continue
+		}
 		if row.JID == "" {
 			// Never scanned (or logged out): no device row exists to look up,
 			// but the session itself is legitimate. Restore it as a fresh,
@@ -178,6 +204,7 @@ func (m *SessionManager) Restore(ctx context.Context) error {
 			client := whatsmeow.NewClient(m.container.NewDevice(), m.waLogger)
 			s := newSession(m, row.ID, row.Name, client)
 			m.register(s)
+			unscannedRestored = append(unscannedRestored, s)
 			s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
 			continue
 		}
@@ -200,12 +227,12 @@ func (m *SessionManager) Restore(ctx context.Context) error {
 			m.log.Error("session connect failed", "session", row.ID, "err", err)
 		}
 	}
-	// Single trailing broadcast: intermediate setAuth broadcasts from
-	// connect()/startPairing() (session.go) may fire for pairing sessions
-	// during the loop above; the main mitigation (no connect() for
-	// unscanned sessions) lands in P1-1. Full suppression of those
-	// intermediate broadcasts would require a restoring flag checked in
-	// session.go's setAuth, which is out of scope for this file (H0-10).
+	// Suppress intermediate broadcasts during restore (P2): setAuth is a
+	// no-op for broadcasts while m.restoring is true. Emit a single
+	// auth-state per unscanned session plus one session-list at the end.
+	for _, s := range unscannedRestored {
+		m.broker.emitAuthState(s.id, sessionAuth(s))
+	}
 	m.broker.emitSessionList(m.infos())
 	m.log.Info("sessions restored", "count", len(m.infos()))
 	return nil
@@ -234,21 +261,18 @@ func (m *SessionManager) Delete(ctx context.Context, id string) error {
 	if !ok {
 		return fmt.Errorf("no session %s", id)
 	}
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
 	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()
-	if client.Store.ID != nil {
+	if client != nil && client.Store != nil && client.Store.ID != nil {
 		if err := client.Logout(ctx); err != nil {
 			m.log.Warn("logout failed; deleting locally", "session", id, "err", err)
-			_ = m.container.DeleteDevice(ctx, client.Store)
 		}
-	} else {
+		_ = m.container.DeleteDevice(ctx, client.Store)
+	} else if client != nil {
 		client.Disconnect()
-		// Store.ID is nil for never-scanned sessions; DeleteDevice on a
-		// nil-ID device is a no-op/error, so guard it (H0-8).
-		if client.Store.ID != nil {
-			_ = m.container.DeleteDevice(ctx, client.Store)
-		}
 	}
 	s.teardownAllCalls()
 	m.unregister(id)
@@ -263,20 +287,17 @@ func (m *SessionManager) Logout(ctx context.Context, id string) error {
 	if !ok {
 		return fmt.Errorf("no session %s", id)
 	}
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
 	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()
-	if client.Store.ID != nil {
+	if client != nil && client.Store != nil && client.Store.ID != nil {
 		if err := client.Logout(ctx); err != nil {
 			m.log.Warn("logout failed", "session", id, "err", err)
 		}
 	}
-	// BLOCKER-1: hold connMu only around replaceClient; release before
-	// setAuth/broadcast (setAuth -> emitSessionList -> infos -> info must not
-	// acquire connMu while it is held here).
-	s.connMu.Lock()
 	s.replaceClient(whatsmeow.NewClient(m.container.NewDevice(), m.waLogger))
-	s.connMu.Unlock()
 	_ = m.store.setJID(ctx, id, "")
 	s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
 	m.log.Info("session disconnected", "session", id)
@@ -288,25 +309,16 @@ func (m *SessionManager) Pair(id string) error {
 	if !ok {
 		return fmt.Errorf("no session %s", id)
 	}
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
 	s.mu.Lock()
-	if s.client.Store.ID != nil {
-		s.mu.Unlock()
+	client := s.client
+	s.mu.Unlock()
+	if client != nil && client.Store != nil && client.Store.ID != nil {
 		return fmt.Errorf("session already paired")
 	}
-	s.mu.Unlock()
-	// BLOCKER-2: hold connMu only around teardown/pairing-start; compute
-	// infos() and broadcast outside the lock (infos -> info must not acquire
-	// connMu while it is held here).
-	s.connMu.Lock()
-	s.mu.Lock()
-	needsReplace := s.client.Store.ID != nil
-	s.mu.Unlock()
-	if needsReplace {
-		s.replaceClient(whatsmeow.NewClient(m.container.NewDevice(), m.waLogger))
-	}
-	err := s.startPairing(m.appCtx)
-	s.connMu.Unlock()
-	if err != nil {
+	s.replaceClient(whatsmeow.NewClient(m.container.NewDevice(), m.waLogger))
+	if err := s.startPairing(m.appCtx); err != nil {
 		return fmt.Errorf("start pairing: %w", err)
 	}
 	m.broker.emitSessionList(m.infos())
