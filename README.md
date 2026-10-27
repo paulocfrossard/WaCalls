@@ -46,23 +46,40 @@ In local tests, it is possible to make one account number make N calls in parall
 
 ---
 
-## Docker 
-Simple version of the app in single docker file.
+## Docker
 
-Verions: Alpine and Debian
+Two flavours: [`Dockerfile.debian`](./Dockerfile.debian) and
+[`Dockerfile.alpine`](./Dockerfile.alpine). Both are multi-stage:
+
+- **Node 22** builds the SDK, then the SPA, with `npm ci`.
+- **Go 1.27** builds a static binary (`CGO_ENABLED=0 -trimpath -buildvcs=false
+  -ldflags="-s -w"`).
+- **Runtime** carries only the binary and `client/dist` — no Go, no Node, no
+  `node_modules`, no database.
 
 [![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white)](https://hub.docker.com/r/caedpaulofrossard/wacalls)
 
+> The prebuilt images on Docker Hub are **legacy — rebuild from source is recommended**.
 
-**Quick run:**
+**Build and run:**
 
 ```bash
-docker image pull caedpaulofrossard/wacalls:debian
-docker run -d -p 5176:8080 --name wecalls --restart=always caedpaulofrossard/wacalls:debian
-firefox 0.0.0.0:5176
+git archive HEAD | docker build -f Dockerfile.debian -t wacalls:debian -
+docker run -d -p 5176:8080 --name wacalls --restart=always \
+  -v wacalls-data:/data wacalls:debian
+firefox http://localhost:5176
 ```
 
-Done!
+The container runs as uid **10001** (non-root). The SQLite database lives at
+`/data/wacalls.db` inside the named volume, so removing the container keeps paired
+sessions while removing the volume does not.
+
+> **Warning:** **Never build from a working directory that contains `wacalls.db`** —
+> that file holds the WhatsApp device credentials, and the image build would package
+> them. Build from `git archive HEAD` as shown above, and see
+> [Container image hygiene](./docs/security.md#container-image-hygiene). Images
+> published before the `.dockerignore`/multi-stage change must be treated as
+> compromised.
 
 ---
 
@@ -176,8 +193,8 @@ cd wacalls-go
 # Go dependencies
 go mod download
 
-# React client dependencies
-cd client && npm install && cd ..
+# React client dependencies (client/package-lock.json is committed → use npm ci)
+cd client && npm ci && cd ..
 ```
 
 ### Run
