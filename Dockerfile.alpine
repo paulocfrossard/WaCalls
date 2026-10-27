@@ -1,18 +1,37 @@
-FROM golang:1.27-alpine AS download
+# --- SDK build ---
+FROM node:22-alpine AS sdk
+WORKDIR /src/sdk
+COPY sdk/package.json sdk/package-lock.json ./
+RUN npm ci
+COPY sdk/ ./
+RUN npm run build
 
-WORKDIR /WaCalls
+# --- Client build ---
+FROM node:22-alpine AS client
+WORKDIR /src
+COPY --from=sdk /src/sdk ./sdk
+COPY client/package.json client/package-lock.json ./client/
+WORKDIR /src/client
+RUN npm ci
+COPY client/ ./
+RUN npm run build
 
-RUN apk update &&\
-    apk add --no-cache \
-    nodejs \
-    npm
-
-#FILES
-COPY . .    
-
+# --- Server build ---
+FROM golang:1.27-alpine AS server
+WORKDIR /src
+COPY go.mod go.sum ./
 RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/wacalls ./cmd/server
 
-RUN cd client && npm audit && npm audit fix && npm install && npm run build 
-
+# --- Runtime ---
+FROM alpine:3.22 AS runtime
+RUN apk add --no-cache ca-certificates \
+ && adduser -D -u 10001 -h /data wacalls
+WORKDIR /data
+COPY --from=server /out/wacalls /usr/local/bin/wacalls
+COPY --from=client /src/client/dist /app/client/dist
+USER wacalls
+VOLUME ["/data"]
 EXPOSE 8080
-CMD ["sh", "-c","go run ./cmd/server -static client/dist -addr :8080"]
+ENTRYPOINT ["/usr/local/bin/wacalls", "-static", "/app/client/dist", "-addr", ":8080", "-db", "/data/wacalls.db"]
