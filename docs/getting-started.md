@@ -27,10 +27,12 @@ cd client && npm install && cd ..
 go run ./cmd/server -addr :8080    # add -debug for verbose logging
 ```
 
-Open `http://localhost:8080`, click **New session**, and scan the QR shown in the
-browser (also printed in the terminal) with **WhatsApp → Linked devices**. Add more
-accounts the same way and switch between them in the sidebar. Sessions persist in
-`wacalls.db` (SQLite, created next to the working directory).
+Open `http://localhost:8080`, click **New session**, and scan the QR that appears
+(browser and terminal) with **WhatsApp → Linked devices**. Add more accounts the
+same way and switch between them in the sidebar. Sessions persist in `wacalls.db`
+(SQLite, created next to the working directory). Restored sessions that were never
+paired come back as **Disconnected** with a **Reactivate** button; the QR appears
+only after clicking **Reactivate**.
 
 ### Server flags (complete)
 
@@ -87,7 +89,7 @@ See [development](./development.md) for the contributor workflow and CI parity.
 |---|---|---|
 | Dev UI loads but every `/api` call fails (502/ERR_CONNECTION) | Backend not listening on the proxy target | Start the server with `-addr :3001` in dev mode |
 | `http://localhost:8080` shows 404 / directory listing | `-static` directory missing or not built | `cd client && npm run build`, or drop `-static` and use `npm run dev` |
-| QR never appears / pairing loops | Device not linked, or session disconnected | Use **WhatsApp → Linked devices → Link a device**; retry `POST /api/sessions/{sid}/pair`; check terminal logs with `-debug` |
+| QR never appears / pairing loops | Device not linked, or session **Disconnected** | Click **Reactivate** on the session (or retry `POST /api/sessions/{sid}/pair`); use **WhatsApp → Linked devices → Link a device**; check terminal logs with `-debug` |
 | `npm run preview` cannot reach the API | Preview has no `/api` proxy by design | Serve the build from the Go server (`-static client/dist`) instead |
 | Audio missing but call connects | Browser mic permission, or device selection | Grant mic permission; pick devices in the UI (device hooks enumerate `getUserMedia` / `setSinkId`) |
 | `429` when starting a call | Per-session call limit reached | Raise `-max-calls-per-session` (default `8`) or end active calls |
