@@ -14,6 +14,9 @@ import (
 
 	"wacalls/internal/voip/logbuf"
 	"wacalls/internal/voip/media"
+
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/store"
 )
 
 func main() {
@@ -54,6 +57,15 @@ func main() {
 	// Watches WritePCM timestamps and warns (source=dup-detector) when two
 	// writes for the same call land <50ms apart = duplicated audio path.
 	go logbuf.StartDupDetector(ctx)
+
+	verCtx, verCancel := context.WithTimeout(ctx, 10*time.Second)
+	if v, verr := whatsmeow.GetLatestVersion(verCtx, nil); verr != nil {
+		log.Warn("could not refresh whatsapp web version; using bundled default", "err", verr)
+	} else {
+		store.SetWAVersion(*v)
+		log.Info("whatsapp web version set", "version", v.String())
+	}
+	verCancel()
 
 	srv, err := newServer(ctx, *dbPath, *staticDir, *maxCalls, allowHosts, log)
 	if err != nil {
