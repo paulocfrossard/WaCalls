@@ -205,6 +205,10 @@ func (s *Session) handleEvent(rawEvt any) {
 		// Tear the client down first (so no retry can be armed while the
 		// state still looks live), then publish the terminal state.
 		s.stopReconnect()
+		// The stored credentials are dead: clear the persisted JID so a
+		// restart treats the session as unscanned (ever_paired stays 1) and
+		// info()/paired stay consistent with the logged_out state.
+		_ = s.mgr.store.setJID(s.mgr.appCtx, s.id, "")
 		s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
 	case *events.CallOffer:
 		s.onIncomingOffer(ctx, evt)
