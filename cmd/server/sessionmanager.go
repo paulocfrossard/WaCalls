@@ -82,9 +82,11 @@ func (m *SessionManager) Get(id string) (*Session, bool) {
 // orderedSessions returns the registered sessions in creation order. The read
 // lock only covers the map/order walk; Session fields are read afterwards
 // under each session's own lock (see Session.info / sessionAuth).
-// Lock order (reads): m.mu (RLock) -> connMu (if needed) -> s.mu. No path
-// holds connMu then acquires m.mu (broadcasts happen outside connMu), so
-// there is no cycle with writes (connMu -> s.mu).
+// Lock order (reads): m.mu (RLock) -> connMu (if needed) -> s.mu. Create
+// holds connMu then acquires m.mu via register/infos (connMu -> m.mu -> s.mu),
+// but broadcasts happen inside that window by design; no inverse path exists
+// (m.mu never acquires connMu), so there is no cycle with writes
+// (connMu -> s.mu).
 func (m *SessionManager) orderedSessions() []*Session {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -246,12 +248,15 @@ func (m *SessionManager) Create(name string) (string, error) {
 	device := m.container.NewDevice()
 	client := whatsmeow.NewClient(device, m.waLogger)
 	s := newSession(m, id, name, client)
+	s.connMu.Lock()
 	m.register(s)
 	m.broker.emitSessionList(m.infos())
 	if err := s.startPairing(m.appCtx); err != nil {
+		s.connMu.Unlock()
 		m.log.Error("start pairing failed", "session", id, "err", err)
 		return "", fmt.Errorf("start pairing: %w", err)
 	}
+	s.connMu.Unlock()
 	m.log.Info("session created", "session", id, "name", name)
 	return id, nil
 }
@@ -265,7 +270,12 @@ func (m *SessionManager) Delete(ctx context.Context, id string) error {
 	defer s.connMu.Unlock()
 	s.mu.Lock()
 	client := s.client
+	handlerID := s.handlerID
 	s.mu.Unlock()
+	if client != nil {
+		client.EnableAutoReconnect = false
+		client.RemoveEventHandler(handlerID)
+	}
 	if client != nil && client.Store != nil && client.Store.ID != nil {
 		if err := client.Logout(ctx); err != nil {
 			m.log.Warn("logout failed; deleting locally", "session", id, "err", err)
