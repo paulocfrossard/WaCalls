@@ -236,7 +236,7 @@ func (s *server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"id": id})
+	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
 func (s *server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
@@ -252,8 +252,12 @@ func (s *server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
-	if err := s.sessions.Logout(r.Context(), r.PathValue("sid")); err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+	sid := r.PathValue("sid")
+	if s.sessionByID(w, sid) == nil {
+		return
+	}
+	if err := s.sessions.Logout(r.Context(), sid); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -265,7 +269,11 @@ func (s *server) handleSessionPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.sessions.Pair(sid); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		if strings.Contains(err.Error(), "already paired") {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		} else {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
