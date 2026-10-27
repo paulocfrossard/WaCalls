@@ -18,7 +18,7 @@ Practical path from clone to a first call. For the big picture see
 git clone <repo-url> wacalls-go
 cd wacalls-go
 go mod download
-cd client && npm install && cd ..
+cd client && npm ci && cd ..
 ```
 
 ## Run the server
@@ -33,6 +33,17 @@ same way and switch between them in the sidebar. Sessions persist in `wacalls.db
 (SQLite, created next to the working directory). Restored sessions that were never
 paired come back as **Disconnected** with a **Reactivate** button; the QR appears
 only after clicking **Reactivate**.
+
+### Container
+
+```bash
+docker build -f Dockerfile.debian -t wacalls:debian .
+docker run -p 8080:8080 -v wacalls-data:/data wacalls:debian
+```
+
+The database is `/data/wacalls.db` inside the volume, and the process runs as uid
+**10001**, so a bind-mounted host directory must be writable by that UID
+(`chown 10001 <dir>` on the host).
 
 ### Server flags (complete)
 
@@ -81,7 +92,8 @@ go test -race -count=1 ./cmd/server/    # server package only
 cd client && npm run build          # client type-check + production build
 ```
 
-See [development](./development.md) for the contributor workflow and CI parity.
+See [development](./development.md) for the contributor workflow and the local
+definition of done.
 
 ## Troubleshooting
 
