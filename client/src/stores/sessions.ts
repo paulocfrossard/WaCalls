@@ -51,6 +51,7 @@ export const ensureSessionsWired = (): void => {
         const qrs = { ...s.qrs };
         if (ev.paired) delete qrs[ev.sessionId];
         else if (ev.qr) qrs[ev.sessionId] = ev.qr;
+        if (ev.state === "logged_out" || !ev.qr) delete qrs[ev.sessionId];
         return { sessions, qrs };
       });
     }
