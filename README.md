@@ -64,9 +64,8 @@ Two flavours: [`Dockerfile.debian`](./Dockerfile.debian) and
 **Build and run:**
 
 ```bash
-git archive HEAD | docker build -f Dockerfile.debian -t wacalls:debian -
 docker run -d -p 5176:8080 --name wacalls --restart=always \
-  -v wacalls-data:/data wacalls:debian
+  -v wacalls-data:/data caedpaulofrossard/wacalls:alpine-v1.1.0
 firefox http://localhost:5176
 ```
 
