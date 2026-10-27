@@ -55,6 +55,11 @@ type Broker struct {
 
 	SnapshotFn func() []any
 
+	// Cached SSE replay snapshot (H0-11). Recomputed only when dirty.
+	snapshotMu    sync.RWMutex
+	snapshot      []any
+	snapshotDirty bool
+
 	// Dispatcher, when non-nil, receives every broadcast event for outbound
 	// webhook delivery (Phase B). Dispatch must be non-blocking.
 	Dispatcher EventDispatcher
@@ -62,8 +67,9 @@ type Broker struct {
 
 func NewBroker() *Broker {
 	return &Broker{
-		subs:  map[*subscriber]struct{}{},
-		calls: map[string]*CallRecord{},
+		subs:          map[*subscriber]struct{}{},
+		calls:         map[string]*CallRecord{},
+		snapshotDirty: true,
 	}
 }
 
@@ -109,14 +115,17 @@ func (b *Broker) emitAuthState(sessionID string, a AuthSnapshot) {
 		"type": "auth-state", "sessionId": sessionID,
 		"paired": a.Paired, "state": a.State, "qr": a.QR,
 	})
+	b.invalidateSnapshot()
 }
 
 func (b *Broker) emitSessionList(sessions []SessionInfo) {
 	b.broadcast(map[string]any{"type": "session-list", "sessions": sessions})
+	b.invalidateSnapshot()
 }
 
 func (b *Broker) emitSessionQR(sessionID, qr string) {
 	b.broadcast(map[string]any{"type": "session-qr", "sessionId": sessionID, "qr": qr})
+	b.invalidateSnapshot()
 }
 
 func (b *Broker) upsertCall(r CallRecord) {
@@ -184,6 +193,11 @@ func (b *Broker) endCall(id, reason string) {
 	ended := *c
 	delete(b.calls, id)
 	b.history = append(b.history, ended)
+	if len(b.history) > 1000 {
+		trimmed := make([]CallRecord, 1000)
+		copy(trimmed, b.history[len(b.history)-1000:])
+		b.history = trimmed
+	}
 	owner := c.Owner
 	sessionID := c.SessionID
 	peer := ended.Peer
@@ -229,6 +243,41 @@ func (b *Broker) historyRows(sessionID string, limit int) []CallRecord {
 	return rows
 }
 
+// Snapshot returns the cached SSE replay snapshot, recomputing via SnapshotFn
+// when dirty (H0-11). Safe for concurrent use.
+func (b *Broker) Snapshot() []any {
+	b.snapshotMu.RLock()
+	if !b.snapshotDirty && b.snapshot != nil {
+		out := b.snapshot
+		b.snapshotMu.RUnlock()
+		return out
+	}
+	b.snapshotMu.RUnlock()
+
+	b.snapshotMu.Lock()
+	defer b.snapshotMu.Unlock()
+	if !b.snapshotDirty && b.snapshot != nil {
+		return b.snapshot
+	}
+	if b.SnapshotFn == nil {
+		b.snapshot = nil
+		b.snapshotDirty = false
+		return nil
+	}
+	evs := b.SnapshotFn()
+	b.snapshot = evs
+	b.snapshotDirty = false
+	return evs
+}
+
+// invalidateSnapshot marks the cached SSE snapshot stale.
+func (b *Broker) invalidateSnapshot() {
+	b.snapshotMu.Lock()
+	b.snapshotDirty = true
+	b.snapshot = nil
+	b.snapshotMu.Unlock()
+}
+
 func (b *Broker) serveSSE(w http.ResponseWriter, r *http.Request, clientID string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -243,8 +292,8 @@ func (b *Broker) serveSSE(w http.ResponseWriter, r *http.Request, clientID strin
 	sub := b.subscribe(clientID)
 	defer b.unsubscribe(sub)
 
-	if b.SnapshotFn != nil {
-		for _, ev := range b.SnapshotFn() {
+	if snap := b.Snapshot(); snap != nil {
+		for _, ev := range snap {
 			writeSSE(w, flusher, ev)
 		}
 	}
