@@ -37,7 +37,7 @@ func newSessionStore(ctx context.Context, db *sql.DB) (*sessionStore, error) {
 			return nil, err
 		}
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE sessions SET ever_paired = 1 WHERE jid IS NOT NULL AND jid != ''`); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE sessions SET ever_paired = 1 WHERE jid IS NOT NULL AND jid != '' AND ever_paired = 0`); err != nil {
 		return nil, err
 	}
 	return &sessionStore{db: db}, nil
