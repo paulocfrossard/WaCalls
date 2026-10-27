@@ -218,8 +218,20 @@ func (m *SessionManager) Restore(ctx context.Context) error {
 		}
 		device, err := m.container.GetDevice(ctx, jid)
 		if err != nil || device == nil {
-			m.log.Warn("dropping session with no stored device", "session", row.ID, "jid", row.JID, "err", err)
-			_ = m.store.delete(ctx, row.ID)
+			// Device material is gone (WhatsApp calls Store.Delete on a 401
+			// device_removed), but the session row is a real, user-created
+			// account. Deleting it made a remote logout look like "my session
+			// disappeared after restart" and was unrecoverable. Restore it as a
+			// pairable logged_out session instead: clear the stale JID and let
+			// Pair() start a fresh QR flow.
+			m.log.Warn("restoring session with no stored device as logged_out; re-pair required",
+				"session", row.ID, "jid", row.JID, "err", err)
+			client := whatsmeow.NewClient(m.container.NewDevice(), m.waLogger)
+			s := newSession(m, row.ID, row.Name, client)
+			m.register(s)
+			_ = m.store.setJID(ctx, row.ID, "")
+			s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
+			unscannedRestored = append(unscannedRestored, s)
 			continue
 		}
 		client := whatsmeow.NewClient(device, m.waLogger)
@@ -323,8 +335,13 @@ func (m *SessionManager) Pair(id string) error {
 	defer s.connMu.Unlock()
 	s.mu.Lock()
 	client := s.client
+	state := s.auth.State
 	s.mu.Unlock()
-	if client != nil && client.Store != nil && client.Store.ID != nil {
+	// Only a genuinely open session is "already paired". A logged_out session
+	// still holds dead credentials in memory (handleEvent does not clear
+	// Store.ID), and connecting/qr sessions may be stuck; for those, Reactivate
+	// must drop the credentials and open a fresh QR channel below.
+	if client != nil && client.Store != nil && client.Store.ID != nil && state == "open" {
 		return fmt.Errorf("session already paired")
 	}
 	s.replaceClient(whatsmeow.NewClient(m.container.NewDevice(), m.waLogger))
