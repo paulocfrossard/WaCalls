@@ -296,6 +296,9 @@ func (s *Session) connectFailed(ctx context.Context, err error) error {
 		s.log.Warn("connect failed transiently; stored credentials kept", "err", err)
 		// H5: schedule a background retry with backoff so the session does
 		// not stay stuck in "connecting" forever after a transient blip.
+		// NOTE: retry goroutines are not tracked here (retryDone deferred);
+		// Delete in sessionmanager.go should wait for in-flight retries with
+		// a timeout before tearing the session down.
 		go func() {
 			s.mu.Lock()
 			client := s.client
