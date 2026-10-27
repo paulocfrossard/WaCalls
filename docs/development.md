@@ -1,52 +1,60 @@
 # Development
 
-Contributor workflow: commands, CI parity, layout, and conventions. Day-one setup is
+Contributor workflow: commands, local gates, layout, and conventions. Day-one setup is
 in [getting-started](./getting-started.md); module responsibilities are in
 [architecture](./architecture.md).
 
 ## Canonical commands
 
-There is **no Makefile** — raw `go` / `npm` commands are the contract (and what CI
-runs).
+There is **no Makefile** — raw `go` / `npm` commands are the contract (and what the
+container build runs).
 
 ### Server (repo root)
 
 ```bash
 go vet ./...                          # static checks
-gofmt -l .                            # must print nothing (CI fails otherwise)
+gofmt -l .                            # must print nothing (gate must pass before commit)
 go build ./...
-go test -race -count=1 ./...          # full suite (matches CI)
+go test -race -count=1 ./...          # full suite (matches the container build gate)
 go test -race -count=1 -run '^TestName$' ./cmd/server/   # single test
 ```
 
 Notes:
 - Tests are co-located `*_test.go` in the same package (server tests are in
   `package main` under `cmd/server/`).
-- CI runs tests with `CGO_ENABLED=1` (race detector) while the build job uses
-  `CGO_ENABLED=0` — the product itself needs no cgo (MLow is vendored pure Go).
+- The container build compiles with `CGO_ENABLED=0` (no cgo needed — MLow is vendored
+  pure Go). Run the race suite locally with `CGO_ENABLED=1`.
 
 ### Client (`cd client` first — all npm scripts live there)
 
 ```bash
-npm ci                # lockfile install (CI uses this, not npm install)
+npm ci                # lockfile install — the only supported path (never npm install)
 npm run build         # tsc -b (type-check gate) && vite build → dist/
 npm run dev           # Vite :5173, /api proxy → http://localhost:3001
 npm run preview       # serve dist/ WITHOUT /api proxy (see caveats)
 ```
 
+`client/package-lock.json` is committed, so `npm ci` is the only supported install
+path — do not use `npm install`.
+
 Gaps to know (documented so nobody hunts for missing scripts):
 - **No `lint` or `test` script** exists in `client/package.json` — the de-facto quality
-  gate is `tsc -b` (inside `build`) plus CI.
-- `package.json` declares **no `engines`** field; CI pins Node **22**.
+  gate is `tsc -b` (inside `build`).
+- `package.json` declares **no `engines`** field; the Dockerfiles pin Node **22**.
 
-## CI parity (`.github/workflows/`)
+## Local definition of done
 
-| Workflow | Trigger | Jobs |
-|---|---|---|
-| `ci.yml` | push/PR to `main` | **server:** `go mod download`+`verify` → `go vet` → `gofmt -l` gate → `go build` → `go test -race -count=1` (CGO=1). **client (Node 22):** `npm ci` → `npx tsc -b` → `npm run build` |
-| `release.yml` | release path | packaging (see the workflow for the exact steps) |
+The workflows that used to live in `.github/workflows/` are no longer part of this
+repository. These are the gates:
 
-Local definition of done: the `ci.yml` server+client commands pass locally.
+```bash
+gofmt -l cmd internal && go vet ./... && go build ./... && go test -count=1 ./...   # Go 1.27.3 toolchain
+cd client && npm ci && npm run build
+cd sdk && npm ci && npm run build
+```
+
+Container parity: both Dockerfiles run the same `npm ci` + `tsc -b` + `vite build` and
+`go build` steps, so a local pass is a good proxy for the image build.
 
 ## Repository layout (docs-relevant)
 
@@ -59,7 +67,6 @@ docs/                this tree
 ideias.md            living brainstorm (pt-BR) — source of truth for ideas/status
 implementacao.md     living implementation plan (pt-BR) — Pré-requisitos/Passos/
                      Riscos/Critério de verificação per item
-.github/workflows/   ci.yml, release.yml
 ```
 
 Planning docs (`ideias.md`, `implementacao.md`) follow an item template:
