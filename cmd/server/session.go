@@ -31,10 +31,9 @@ type Session struct {
 	mgr  *SessionManager
 	log  *slog.Logger
 
-	client        *whatsmeow.Client
-	handlerID     uint32
-	handlerClient *whatsmeow.Client
-	reg           *callRegistry
+	client    *whatsmeow.Client
+	handlerID uint32
+	reg       *callRegistry
 
 	mu   sync.Mutex
 	auth AuthSnapshot
@@ -54,16 +53,26 @@ type Session struct {
 
 func newSession(mgr *SessionManager, id, name string, client *whatsmeow.Client) *Session {
 	s := &Session{
-		id:            id,
-		name:          name,
-		mgr:           mgr,
-		log:           mgr.log.With("session", id),
-		client:        client,
-		handlerClient: client,
-		auth:          AuthSnapshot{State: "connecting"},
-		reg:           newCallRegistry(),
+		id:     id,
+		name:   name,
+		mgr:    mgr,
+		log:    mgr.log.With("session", id),
+		client: client,
+		auth:   AuthSnapshot{State: "connecting"},
+		reg:    newCallRegistry(),
 	}
-	s.handlerID = client.AddEventHandler(s.handleEvent)
+	// Register a handler that captures the client at registration time, so a
+	// stale event from a discarded client (post-replaceClient) is dropped
+	// instead of mutating the replacement client (H3 identity guard).
+	s.handlerID = client.AddEventHandler(func(evt any) {
+		s.mu.Lock()
+		if s.client != client {
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+		s.handleEvent(evt)
+	})
 	return s
 }
 
@@ -177,20 +186,18 @@ func (s *Session) rejectOffer(ctx context.Context, node *waBinary.Node, from typ
 }
 
 func (s *Session) handleEvent(rawEvt any) {
-	s.mu.Lock()
-	if s.handlerClient != nil && s.client != s.handlerClient {
-		s.mu.Unlock()
-		return
-	}
-	s.mu.Unlock()
+	// Identity guard is enforced by the closure registered in newSession/
+	// replaceClient, which captures the client at registration time.
 	ctx := context.Background()
 	switch evt := rawEvt.(type) {
 	case *events.Connected:
 		s.mu.Lock()
 		c := s.client
 		s.mu.Unlock()
-		if id := c.Store.ID; id != nil {
-			_ = s.mgr.store.setJID(s.mgr.appCtx, s.id, id.String())
+		if c != nil && c.Store != nil {
+			if id := c.Store.ID; id != nil {
+				_ = s.mgr.store.setJID(s.mgr.appCtx, s.id, id.String())
+			}
 		}
 		s.setAuth(AuthSnapshot{State: "open", Paired: true})
 	case *events.LoggedOut:
@@ -287,11 +294,43 @@ func (s *Session) connectFailed(ctx context.Context, err error) error {
 	}
 	if isTransientConnectError(err) {
 		s.log.Warn("connect failed transiently; stored credentials kept", "err", err)
+		// H5: schedule a background retry with backoff so the session does
+		// not stay stuck in "connecting" forever after a transient blip.
+		go func() {
+			s.mu.Lock()
+			client := s.client
+			s.mu.Unlock()
+			retryCtx := context.Background()
+			for attempt := 1; attempt <= 3; attempt++ {
+				time.Sleep(time.Duration(attempt) * 5 * time.Second)
+				// Abort if session was deleted.
+				if _, ok := s.mgr.Get(s.id); !ok {
+					return
+				}
+				s.mu.Lock()
+				if s.client != client {
+					s.mu.Unlock()
+					return
+				}
+				if s.auth.State == "open" {
+					s.mu.Unlock()
+					return
+				}
+				s.mu.Unlock()
+				if rerr := s.connect(retryCtx); rerr == nil {
+					s.log.Info("connect retry succeeded", "attempt", attempt)
+					return
+				} else {
+					s.log.Warn("connect retry failed", "attempt", attempt, "err", rerr)
+				}
+			}
+		}()
 		return err
 	}
 	s.log.Warn("connect failed; dropping stored credentials and opening QR", "err", err)
 	s.replaceClient(whatsmeow.NewClient(s.mgr.container.NewDevice(), s.mgr.waLogger))
 	if pairErr := s.startPairing(ctx); pairErr != nil {
+		s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
 		return fmt.Errorf("connect: %w (qr fallback: %v)", err, pairErr)
 	}
 	return nil
@@ -332,17 +371,44 @@ func isTransientConnectError(err error) bool {
 // disabling EnableAutoReconnect closes the remaining retry paths. connMu keeps
 // this from racing an in-flight connect().
 func (s *Session) stopReconnect() {
-	s.connMu.Lock()
-	defer s.connMu.Unlock()
-	s.mu.Lock()
-	if s.handlerClient != nil && s.client != s.handlerClient {
+	// H4: connMu may already be held by this goroutine when stopReconnect is
+	// invoked from within a connMu-held context (e.g. synchronously inside
+	// client.Connect()). Go's sync.Mutex is not re-entrant, so use TryLock and
+	// defer the teardown to a goroutine in that case, clearing the slot now.
+	if !s.connMu.TryLock() {
+		// connMu already held (re-entrant). Capture client now; defer teardown
+		// only if the client hasn't changed by then.
+		s.mu.Lock()
+		client := s.client
 		s.mu.Unlock()
+		go func() {
+			s.connMu.Lock()
+			defer s.connMu.Unlock()
+			s.mu.Lock()
+			if s.client != client {
+				s.mu.Unlock()
+				return // client changed, abort teardown
+			}
+			// Clear the slot only after the identity check, in the deferred
+			// path (never in the main path).
+			s.qrActive = false
+			s.qrGen++
+			s.mu.Unlock()
+			if client != nil {
+				client.EnableAutoReconnect = false
+				client.Disconnect()
+			}
+		}()
 		return
 	}
+	defer s.connMu.Unlock()
+	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()
-	client.EnableAutoReconnect = false
-	client.Disconnect()
+	if client != nil {
+		client.EnableAutoReconnect = false
+		client.Disconnect()
+	}
 	// Clear any in-flight pairing claim so a pairing active at logout does
 	// not leave the slot claimed and block future QR (MEDIUM-2). Lock order
 	// connMu -> s.mu, consistent with the rest of the code.
@@ -375,15 +441,15 @@ func (s *Session) endPairing(gen int) {
 }
 
 func (s *Session) startPairing(ctx context.Context) error {
-	s.mu.Lock()
-	client := s.client
-	s.mu.Unlock()
 	gen, ok := s.beginPairing()
 	if !ok {
 		// inv 4: another QR channel is already live for this session.
 		s.log.Debug("pairing already active; not opening a second QR channel")
 		return nil
 	}
+	s.mu.Lock()
+	client := s.client
+	s.mu.Unlock()
 	qrChan, err := client.GetQRChannel(ctx)
 	if err != nil {
 		s.endPairing(gen)
@@ -398,6 +464,7 @@ func (s *Session) startPairing(ctx context.Context) error {
 	}
 	go func() {
 		defer s.endPairing(gen)
+		terminal := false
 		for evt := range qrChan {
 			switch evt.Event {
 			case "code":
@@ -406,13 +473,13 @@ func (s *Session) startPairing(ctx context.Context) error {
 				s.setAuth(AuthSnapshot{State: "qr", QR: evt.Code})
 				s.mgr.broker.emitSessionQR(s.id, evt.Code)
 			case "success":
-				s.mu.Lock()
-				c := s.client
-				s.mu.Unlock()
-				if id := c.Store.ID; id != nil {
-					_ = s.mgr.store.setJID(s.mgr.appCtx, s.id, id.String())
+				if client.Store != nil {
+					if id := client.Store.ID; id != nil {
+						_ = s.mgr.store.setJID(s.mgr.appCtx, s.id, id.String())
+					}
 				}
 				s.setAuth(AuthSnapshot{State: "open", Paired: true})
+				terminal = true
 			case "timeout":
 				// Disable auto-reconnect + disconnect before publishing the
 				// terminal state, so the slot is not left armed/connected
@@ -420,7 +487,11 @@ func (s *Session) startPairing(ctx context.Context) error {
 				// not holding it, so it is safe to call here.
 				s.stopReconnect()
 				s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
+				terminal = true
 			}
+		}
+		if !terminal {
+			s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
 		}
 	}()
 	return nil
@@ -430,6 +501,9 @@ func (s *Session) setAuth(a AuthSnapshot) {
 	s.mu.Lock()
 	s.auth = a
 	s.mu.Unlock()
+	if s.mgr.isRestoring() {
+		return
+	}
 	s.mgr.broker.emitAuthState(s.id, a)
 	s.mgr.broker.emitSessionList(s.mgr.infos())
 }
@@ -445,7 +519,7 @@ func (s *Session) info() SessionInfo {
 			jid = id.String()
 		}
 	}
-	return SessionInfo{ID: s.id, Name: s.name, JID: jid, State: a.State, Paired: a.Paired || jid != ""}
+	return SessionInfo{ID: s.id, Name: s.name, JID: jid, State: a.State, Paired: a.Paired || (a.State != "logged_out" && jid != "")}
 }
 
 func (s *Session) setBridge(callID string, b *Bridge) {
@@ -505,23 +579,32 @@ func (s *Session) replaceClient(client *whatsmeow.Client) {
 	s.mu.Unlock()
 
 	s.teardownAllCalls()
-	// H0-3: disarm auto-reconnect on old client
-	oldClient.EnableAutoReconnect = false
-	// H0-2: remove event handler from old client
-	oldClient.RemoveEventHandler(oldHandlerID)
-	// H0-1: clear persisted JID of discarded client
-	if oldClient.Store != nil && oldClient.Store.ID != nil {
-		_ = s.mgr.store.setJID(s.mgr.appCtx, s.id, "")
-		_ = s.mgr.container.DeleteDevice(s.mgr.appCtx, oldClient.Store)
+	if oldClient != nil {
+		// H0-3: disarm auto-reconnect on old client
+		oldClient.EnableAutoReconnect = false
+		// H0-2: remove event handler from old client
+		oldClient.RemoveEventHandler(oldHandlerID)
+		// H0-1: clear persisted JID of discarded client
+		if oldClient.Store != nil && oldClient.Store.ID != nil {
+			_ = s.mgr.store.setJID(s.mgr.appCtx, s.id, "")
+			_ = s.mgr.container.DeleteDevice(s.mgr.appCtx, oldClient.Store)
+		}
+		oldClient.Disconnect()
 	}
-	oldClient.Disconnect()
 
-	// H0-9/HIGH-2: assign the new client fields under s.mu so handleEvent
-	// readers (which check s.client/s.handlerClient under s.mu) cannot race.
+	// Register a handler capturing the new client, so stale events from the
+	// discarded client are dropped (H3 identity guard).
 	s.mu.Lock()
 	s.client = client
-	s.handlerID = client.AddEventHandler(s.handleEvent)
-	s.handlerClient = client
+	s.handlerID = client.AddEventHandler(func(evt any) {
+		s.mu.Lock()
+		if s.client != client {
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+		s.handleEvent(evt)
+	})
 	s.qrActive = false
 	s.qrGen++
 	s.mu.Unlock()
@@ -531,7 +614,13 @@ func (s *Session) shutdown() {
 	s.teardownAllCalls()
 	s.mu.Lock()
 	client := s.client
+	handlerID := s.handlerID
 	s.mu.Unlock()
+	if client == nil {
+		return
+	}
+	client.EnableAutoReconnect = false
+	client.RemoveEventHandler(handlerID)
 	client.Disconnect()
 }
 
