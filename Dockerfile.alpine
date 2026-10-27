@@ -1,10 +1,9 @@
-FROM alpine:latest AS download
+FROM golang:1.27-alpine AS download
 
 WORKDIR /WaCalls
 
 RUN apk update &&\
     apk add --no-cache \
-    go \
     nodejs \
     npm
 
