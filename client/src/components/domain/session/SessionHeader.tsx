@@ -40,7 +40,7 @@ export const SessionHeader = ({ session }: { session: SessionInfo }) => {
         <h1 className="truncate text-xl font-semibold tracking-tight">{session.name}</h1>
         <Badge variant={statusVariant[session.state]}>{statusLabel[session.state]}</Badge>
       </div>
-      {session.paired ? (
+      {session.state === "open" ? (
         <Button variant="outline" size="sm" disabled={busy} onClick={() => run(() => logoutSession(session.id))}>
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Power className="h-4 w-4" />}
           Disconnect
