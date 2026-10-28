@@ -1,6 +1,9 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
-  /** Optional bearer token forwarded to the WaCalls SDK (REST auth / SSE query). */
+  /** Optional WaCalls API origin; empty/undefined means same-origin. */
+  readonly VITE_WACALLS_BASE_URL?: string;
+  /** @deprecated Static API keys are no longer read by the client — the SDK
+   *  authenticates with the session token from the auth store. */
   readonly VITE_WACALLS_API_KEY?: string;
 }
