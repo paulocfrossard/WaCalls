@@ -34,8 +34,9 @@ and `POST /api/auth/logout` are public; every other `/api/*` route is protected 
 Send **one** credential. For REST routes the server reads them in this order
 (`cmd/server/auth.go`):
 
-1. `Authorization: Bearer <API key>` — API clients only. The browser never
-   receives a bearer token from login, so it does not use this header.
+1. `Authorization: Bearer <session token or API key>` — tried as a session
+   token first, then as an API key. Login never returns a token, so the bundled
+   browser client uses the cookie instead.
 2. `X-API-Key: <key>` — an API key.
 3. Cookie `wacalls_session` — set by login, `HttpOnly`, `SameSite=Lax`,
    `Secure` by default.
@@ -111,9 +112,9 @@ principal — never use it on a shared network.
 
 | Method | Path | Body | Success | Errors | Notes |
 |---|---|---|---|---|---|
-| `POST` | `/api/sessions/{sid}/calls` | `{"phone": "...", "duration_ms"?: n, "record"?: bool}` | `200` `{"callId": "..."}` | `503` unpaired, `409` operator busy, `429` over `-max-calls-per-session`, `400`/`500` | starts the WhatsApp `<call>` offer |
+| `POST` | `/api/sessions/{sid}/calls` | `{"phone": "...", "duration_ms"?: n, "record"?: bool}` | `200` `{"call": {"callId": "..."}}` | `503` unpaired, `409` operator busy, `429` over `-max-calls-per-session`, `400`/`500` | starts the WhatsApp `<call>` offer |
 | `POST` | `/api/sessions/{sid}/calls/{id}/webrtc` | `{"sdp_offer": "..."}` | `200` `{"sdp_answer": "..."}` | `404` | attaches the browser `Bridge` (pion) |
-| `POST` | `/api/sessions/{sid}/calls/{id}/accept` | — | `200` | `409` claimed/busy, `404` | claim + accept an incoming call |
+| `POST` | `/api/sessions/{sid}/calls/{id}/accept` | — | `200` `{"call": {"callId": "..."}}` | `409` claimed/busy, `404` | claim + accept an incoming call |
 | `POST` | `/api/sessions/{sid}/calls/{id}/reject` | — | `200` **always** (idempotent, even if absent) | — | reject incoming |
 | `DELETE` | `/api/sessions/{sid}/calls/{id}` | — | `204` | `404` | end an active call |
 
@@ -226,10 +227,11 @@ instead if you want the delivery retried.
 | Method | Path | Notes |
 |---|---|---|
 | `POST` | `/api/auth/sse-ticket` | Exchange any valid credential for `{"ticket", "expiresAt"}`. Single-use, 60 s TTL. |
-| `GET` | `/api/events` | One SSE channel for everything. **Requires authentication via `?ticket=`.** Client id from `?clientId=` (the client uses this) or `X-Client-Id`. |
+| `GET` | `/api/events` | One SSE channel for everything. **Requires authentication** — a single-use `?ticket=` (preferred), or the `wacalls_session` cookie when no ticket is supplied. Client id from `?clientId=` (the client uses this) or `X-Client-Id`. |
 
 Because `EventSource` cannot send headers, the SSE stream is authenticated with a
-**one-time ticket** — the only query credential the server accepts:
+**one-time ticket** (or the session cookie when no ticket is supplied) — the
+ticket is the only query credential the server accepts:
 
 ```
 POST /api/auth/sse-ticket     # with cookie, Bearer API key, or X-API-Key
