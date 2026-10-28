@@ -242,7 +242,7 @@ WACALLS_ADMIN_PASSWORD=changeme go run ./cmd/server -static client/dist -addr :8
 | `-webhook-allow-hosts` | `""` | Comma-separated hostnames webhooks may target (`""` = any host) |
 | `-admin-user` | `admin` | Bootstrap admin username (used only when the users table is empty) |
 | `-session-ttl` | `24h` | Auth session lifetime |
-| `-allowed-origins` | `""` | Comma-separated CORS origins (`""` = allow any origin) |
+| `-allowed-origins` | `$ALLOWED_ORIGINS` | Comma-separated CORS origins (`""` = allow any origin) |
 | `-cookie-secure` | `true` | Mark session cookies `Secure`; set `false` for plain-HTTP dev |
 | `-trust-proxy` | `false` | Honor `X-Forwarded-For` / `X-Forwarded-Proto` from a front proxy |
 | `-auth-disabled` | `false` | Disable auth on `/api` routes (insecure; dev only) |
