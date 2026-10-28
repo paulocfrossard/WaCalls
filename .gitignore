@@ -38,6 +38,8 @@ Thumbs.db
 !native/
 !native/*.dll
 debug.md
+# local PR reports
+/prs/
 
 .env
 .env.*
