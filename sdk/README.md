@@ -10,7 +10,7 @@ the host app only wires events and buttons.
 ## Install / build
 
 ```sh
-npm install
+npm ci             # lockfile install — do not use npm install
 npm run build      # tsup → dist/
 npm run typecheck  # tsc --noEmit
 ```
