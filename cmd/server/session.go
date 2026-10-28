@@ -38,6 +38,10 @@ type Session struct {
 	mu   sync.Mutex
 	auth AuthSnapshot
 
+	// retrying guards the untracked retry goroutine spawned by connectFailed
+	// (H3). retryDone is closed when no retry is running.
+	retrying  bool
+	retryDone chan struct{}
 	// connMu serializes connect() with the logout teardown (F1), so a
 	// LoggedOut event can never race an in-flight connect()/pairing start.
 	// It is held across blocking whatsmeow calls, hence kept separate from
@@ -53,13 +57,14 @@ type Session struct {
 
 func newSession(mgr *SessionManager, id, name string, client *whatsmeow.Client) *Session {
 	s := &Session{
-		id:     id,
-		name:   name,
-		mgr:    mgr,
-		log:    mgr.log.With("session", id),
-		client: client,
-		auth:   AuthSnapshot{State: "connecting"},
-		reg:    newCallRegistry(),
+		id:        id,
+		name:      name,
+		mgr:       mgr,
+		log:       mgr.log.With("session", id),
+		client:    client,
+		auth:      AuthSnapshot{State: "connecting"},
+		reg:       newCallRegistry(),
+		retryDone: make(chan struct{}),
 	}
 	// Register a handler that captures the client at registration time, so a
 	// stale event from a discarded client (post-replaceClient) is dropped
@@ -298,15 +303,26 @@ func (s *Session) connectFailed(ctx context.Context, err error) error {
 	}
 	if isTransientConnectError(err) {
 		s.log.Warn("connect failed transiently; stored credentials kept", "err", err)
-		// H5: schedule a background retry with backoff so the session does
-		// not stay stuck in "connecting" forever after a transient blip.
-		// NOTE: retry goroutines are not tracked here (retryDone deferred);
-		// Delete in sessionmanager.go should wait for in-flight retries with
-		// a timeout before tearing the session down.
-		go func() {
-			s.mu.Lock()
-			client := s.client
+		// H3: track the retry goroutine so it cannot be spawned twice and
+		// can be awaited on teardown.
+		s.mu.Lock()
+		if s.retrying {
 			s.mu.Unlock()
+			return err
+		}
+		s.retrying = true
+		s.retryDone = make(chan struct{})
+		client := s.client
+		s.mu.Unlock()
+
+		go func() {
+			defer func() {
+				s.mu.Lock()
+				s.retrying = false
+				close(s.retryDone)
+				s.retryDone = make(chan struct{})
+				s.mu.Unlock()
+			}()
 			retryCtx := context.Background()
 			for attempt := 1; attempt <= 3; attempt++ {
 				time.Sleep(time.Duration(attempt) * 5 * time.Second)
@@ -323,6 +339,11 @@ func (s *Session) connectFailed(ctx context.Context, err error) error {
 					s.mu.Unlock()
 					return
 				}
+				// Nil guard on client.Store in the retry path.
+				if client == nil || client.Store == nil {
+					s.mu.Unlock()
+					return
+				}
 				s.mu.Unlock()
 				if rerr := s.connect(retryCtx); rerr == nil {
 					s.log.Info("connect retry succeeded", "attempt", attempt)
@@ -331,6 +352,9 @@ func (s *Session) connectFailed(ctx context.Context, err error) error {
 					s.log.Warn("connect retry failed", "attempt", attempt, "err", rerr)
 				}
 			}
+			// After 3 failures: needs manual Reactivate.
+			s.log.Warn("session needs manual Reactivate after repeated connect failures", "session", s.id)
+			s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
 		}()
 		return err
 	}
