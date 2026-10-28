@@ -54,7 +54,9 @@ with the `examples/` directory; the snippet above is the reference usage.
 |---|---|---|---|---|
 | `baseUrl` | `string` | yes | — | API origin (e.g. `http://localhost:8080`); `""` = same-origin |
 | `clientId` | `string` | yes | — | Stable operator id — sent as `X-Client-Id` (REST) and `?clientId=` (SSE) |
-| `apiKey` | `string?` | no | — | Bearer token on REST + `?apiKey=` on SSE (see [Auth](#auth)) |
+| `token` | `string?` | no | — | Session token — REST `Authorization: Bearer <token>` **only**; wins over `apiKey` |
+| `ticketProvider` | `() => Promise<string>` | no | — | Awaited before **every** SSE (re)connect; the result is sent as `?ticket=` (see [Authentication](#authentication)) |
+| `apiKey` | `string?` | no | — | Legacy API key — REST `Authorization: Bearer <apiKey>` **only**; never on the SSE URL |
 | `micId` | `string \| null?` | no | system default | Exact microphone `deviceId` for calls opened by this client |
 | `outId` | `string \| null?` | no | system default | Output `deviceId` (`setSinkId`) for the internal downlink `<audio>` |
 
@@ -77,6 +79,7 @@ through only when the raw frame carries them.
 |---|---|---|
 | `connect()` | `() => void` | Opens the single SSE stream (idempotent); reconnects with backoff until `disconnect()` |
 | `disconnect()` | `() => void` | Closes SSE, cancels reconnects, best-effort server-side hangup + local media release |
+| `setToken` | `(token: string \| null) => void` | Replaces the REST bearer; a string also reopens the live SSE stream. `null` clears the bearer, stops reconnects and **closes** the stream — the next `connect()` (or a new `setToken`) reopens it. An active call is never torn down |
 | `startCall` | `(sessionId, phone, opts?: { durationMs?, record? }) => Promise<void>` | `POST .../calls` then opens media (user-gesture context) — **`durationMs`/`record` are reserved: currently ignored by the server** |
 | `answerCall` | `(sessionId, callId) => Promise<void>` | accept + open media (uses the server-returned `callId` when present) |
 | `rejectCall` | `(sessionId, callId) => Promise<void>` | no media involved |
@@ -91,27 +94,72 @@ through only when the raw frame carries them.
 Low-level building blocks (`openCall`, `Emitter`, PCM helpers, downlink monitor)
 are re-exported for advanced embedders — see `dist/index.d.ts`.
 
+## Authentication
+
+REST and SSE authenticate differently, because `EventSource` cannot send headers.
+
+**REST (`fetch`)** — every call sends `X-Client-Id`, plus
+`Authorization: Bearer <token | apiKey>` when either is configured (`token` wins),
+and `credentials: "include"`, so the HttpOnly session cookie from a browser login
+authenticates the request even with no bearer set. `apiKey` is a **REST-only**
+credential; it is never used for the event stream.
+
+**SSE (`EventSource`)** — the URL carries **no** long-lived credential in its query
+string: neither the API key nor the session token is appended. The only query
+credential the server accepts is a short-lived, single-use `?ticket=`, supplied in
+one of two ways:
+
+- **`ticketProvider`** (recommended): `ticketProvider?: () => Promise<string>` is
+  awaited before **every** SSE (re)connect and its result is appended as
+  `?ticket=<ticket>`. Mint a fresh single-use ticket there — tickets are consumed
+  on use and expire quickly, so caching one breaks reconnects. If the provider
+  throws or returns an empty/blank string, the SDK opens the stream cookie-only.
+- **Cookie-only**: with no `ticketProvider`, the stream authenticates purely via
+  the ambient session cookie (same `credentials: "include"` semantics as REST).
+
+```ts
+const client = new WaCallsSDK.WaCallsClient({
+  baseUrl: "https://wa.example.com",
+  clientId: "chatwoot-agent-1",
+  // Called on every (re)connect; never send a long-lived key in a URL.
+  ticketProvider: async () => {
+    const res = await fetch("/api/auth/sse-ticket", {
+      method: "POST",
+      credentials: "include",
+    });
+    return (await res.json()).ticket; // → ?ticket=<ticket>
+  },
+});
+```
+
+Rotate the REST credential with `client.setToken(token)`; `setToken(null)` clears
+it, stops reconnects and closes the stream (the next `connect()` reopens it).
+Details: [`docs/api.md`](../docs/api.md#authentication),
+[`docs/security.md`](../docs/security.md).
+
 ## Notes
 
 - **Zero runtime dependencies** — nothing to install downstream; `dependencies` in
   `package.json` is empty by design.
 - **Audio worklets are embedded** as source strings and registered via a
   `Blob` URL — no worklet files to host on your server.
-- **One `EventSource`** per client: `{baseUrl}/api/events?clientId=…[&apiKey=…]`,
+- **One `EventSource`** per client: `{baseUrl}/api/events?clientId=…[&ticket=…]`,
   `data:` frames only, `: ping` comments ignored natively, exponential-backoff
   reconnect (1s → 30s cap) until `disconnect()`.
 - **AudioContext requires a user gesture**: always call `startCall` /
   `answerCall` from a click/keypress handler (the SDK resumes the context
   internally during that gesture).
-- **Auth**: the API key travels as `Authorization: Bearer <apiKey>` on REST calls
-  and as `?apiKey=<apiKey>` on the SSE URL (`EventSource` cannot send headers).
-  Server-side enforcement is **pending** — today the backend accepts and ignores
-  the key (forward-compatible; see [`docs/api.md`](../docs/api.md)).
-- **Security (read this before shipping a key)**: the API key rides the SSE
-  **query string**, so the server must strip `apiKey` from access logs, and in
-  the Chatwoot/Vite build `VITE_WACALLS_API_KEY` is **inlined into the public
-  browser bundle** — anyone can read it. Treat it as a scoped, rotatable UI
-  credential (never a secret with backend power), and rotate it when in doubt.
+- **Auth**: see [Authentication](#authentication). REST uses
+  `Authorization: Bearer <token | apiKey>` when configured **and** always
+  `credentials: "include"`; SSE uses only `?ticket=` from `ticketProvider`, or
+  the session cookie when no provider is set.
+- **Security (read this before shipping a key)**: no API key or session token is
+  ever placed in a URL, so access logs and `Referer` headers only ever see a
+  short-lived ticket (already consumed or expired). However, in the
+  Chatwoot/Vite build `VITE_WACALLS_API_KEY` is **inlined into the public
+  browser bundle** — anyone can read it. Prefer cookie login plus
+  `ticketProvider`, treat any bundled key as a scoped, rotatable UI credential
+  (never a secret with backend power), and rotate it when in doubt.
 - **`StartCallOptions` are reserved**: the server currently **ignores**
   `durationMs` and `record` (it decodes them and drops them — no call timeout,
   no recording). Do not promise those features until the server implements them.
