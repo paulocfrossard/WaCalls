@@ -78,6 +78,48 @@ request host or `-allowed-origins` (CSRF guard). `-auth-disabled` is a dev-only
 escape hatch that injects a synthetic `admin` principal; a nil auth store makes the
 middleware a no-op. See [api](./api.md#authentication) and [security](./security.md).
 
+### Auth design decisions
+
+The choices behind the surface above. **(implemented)** is shipped;
+**(planned)** is an agreed target that is not built yet.
+
+1. **Opaque sessions instead of JWT (implemented).** A login mints 32 random bytes;
+   only their SHA-256 lands in `sessions_auth.token_hash` (unique index). Each request
+   reloads the row and rejects it when `revoked` or past the `-session-ttl` deadline.
+   The browser carries it in the `HttpOnly` `wacalls_session` cookie.
+   *Rationale:* the server is single-instance on SQLite. A stateless JWT would still
+   need a revocation list plus signing and key rotation; an opaque session gives
+   immediate revocation with one indexed `SELECT`.
+   *Consequences:* session auth depends on database availability, and logout, expiry,
+   and revocation all take effect immediately. JWTs are not used anywhere.
+
+2. **API keys for integrations (implemented).** Admins issue keys; the secret is
+   stored as a SHA-256 hash and shown once, with a short prefix kept for listing.
+   Keys are revocable and authenticate via `X-API-Key` or `Authorization: Bearer`.
+
+3. **Single-use SSE ticket (implemented).** Because `EventSource` cannot set headers,
+   the ticket keeps a long-lived credential out of the event-stream URL. It is 60 s,
+   single-use, and scoped to `GET /api/events`; `Authorization: Bearer` is also
+   accepted directly. The client SDK uses the native `EventSource` —
+   `@microsoft/fetch-event-source` is not a dependency.
+
+4. **SSE revalidation and revocation (planned).** Today the stream authenticates
+   only at connect. Subscribers will carry `sessionID` / `apiKeyID` / `userID`;
+   logout or revocation will close matching connections through a revocation channel,
+   with a read-only re-check on the existing 20 s keepalive.
+
+5. **RBAC (current plus target).** Roles are `admin` and `operator`. Webhooks move to
+   `admin` because outbound URLs are an SSRF/egress surface.
+
+   | Surface | Current | Target |
+   |---|---|---|
+   | API keys (`/api/auth/keys*`), debug logs | `admin` | `admin` |
+   | Sessions, calls, history, events | `operator` | `operator` |
+   | Webhooks (`/api/webhooks*`) | any authenticated | `admin` (planned) |
+
+   Session management stays `operator` because it is the product's main flow. Per-user
+   ownership on the `sessions` table is deferred; the system is single-tenant.
+
 ## `internal/` modules
 
 | Package | Responsibility |
