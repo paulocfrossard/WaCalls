@@ -11,7 +11,7 @@ Two components in one repo, one process for the backend:
 ```
 Browser (client/)                        Go server (cmd/server)
 ┌──────────────────────────┐            ┌───────────────────────────────────┐
-│ React 19 + Vite SPA      │  HTTP/SSE  │ httpapi.go  ── routes, no auth    │
+│ React 19 + Vite SPA      │  HTTP/SSE  │ httpapi.go  ── routes + auth      │
 │  pages/ components/      │◄──────────►│ broker.go   ── SSE fan-out        │
 │  stores/ hooks/ services/│  /api/*    │ sessionmanager.go / sessionstore  │
 │  sdk/src (webrtc, pcm)   │            │ callregistry.go / callrouting.go  │
@@ -30,7 +30,7 @@ Browser (client/)                        Go server (cmd/server)
 
 ## Process layout (`cmd/server/`)
 
-Entrypoint `main.go` parses the seven flags (see
+Entrypoint `main.go` parses the flags (see
 [getting-started](./getting-started.md)), opens SQLite, wires a `server`, and serves
 HTTP with graceful shutdown.
 
@@ -38,6 +38,9 @@ HTTP with graceful shutdown.
 |---|---|
 | `server.go` | `newServer`, lifecycle |
 | `httpapi.go` | `ServeMux` route table (Go 1.22+ method patterns), JSON helpers, `clientID` resolution, debug-log handler |
+| `auth.go` | `authMiddleware`: credential precedence, session/API-key lookup, CSRF origin check, `requireRole`, audit writer |
+| `authapi.go` | Public login/logout, `GET /api/auth/me`, API-key CRUD, login rate limiter |
+| `authstore.go` | SQLite auth tables: users, sessions, API keys, audit log |
 | `broker.go` | In-memory SSE broker: session/call event fan-out, `CallStatus` states |
 | `sessionmanager.go` / `sessionstore.go` | Account sessions + SQLite persistence (`sessions` table) |
 | `callregistry.go` / `callrouting.go` | Active call bookkeeping and routing |
@@ -46,6 +49,34 @@ HTTP with graceful shutdown.
 
 Tests are co-located `*_test.go` in `package main` (bridge, db, sessionstore,
 callrouting, broker, sessionmanager, debuglogs, callregistry).
+
+## Authentication
+
+`server.routes()` wraps the `/api` surface in `authMiddleware` (`cmd/server/auth.go`).
+REST requests authenticate with `Authorization: Bearer <API key>`, `X-API-Key`, or
+the `wacalls_session` cookie; the middleware rejects a malformed `Authorization`
+header with `401` instead of falling through. Sessions and API keys are stored as
+SHA-256 hashes and looked up by hash.
+
+**Browser login is cookie-only.** `POST /api/auth/login` sets the `HttpOnly`
+`wacalls_session` cookie and returns only `{expiresAt, user}` — no session token in
+the body and nothing in `localStorage`. API clients (scripts, integrations) use
+admin-issued API keys instead.
+
+**SSE uses a one-time ticket.** `EventSource` cannot set headers, so the client
+calls `POST /api/auth/sse-ticket` with its cookie (or an API key) to mint a
+single-use, 60 s ticket, then connects to `GET /api/events?ticket=…`. The ticket is
+consumed on use and scoped to that route; no other query-string credential is
+accepted.
+
+Public routes — reachable without a valid session — are `POST /api/auth/login`,
+`POST /api/auth/logout`, and everything outside `/api/` (static assets + SPA
+fallback). `POST /api/auth/sse-ticket` requires a valid credential.
+`requireRole` gates admin-only routes (`/api/auth/keys*`, `GET /api/debug/logs`). A
+cookie-authenticated non-GET request carrying an `Origin` header must match the
+request host or `-allowed-origins` (CSRF guard). `-auth-disabled` is a dev-only
+escape hatch that injects a synthetic `admin` principal; a nil auth store makes the
+middleware a no-op. See [api](./api.md#authentication) and [security](./security.md).
 
 ## `internal/` modules
 
@@ -89,7 +120,7 @@ Key libraries:
 | File | Role |
 |---|---|
 | `lib/api.ts` | fetch helpers; attaches advisory `X-Client-Id` header |
-| `sdk/src/index.ts` (SDK package) | `EventSource` on `/api/events?clientId=…`; typed `BrokerEvent` union in `client/src/types/broker.ts` |
+| `sdk/src/index.ts` (SDK package) | `EventSource` on `/api/events?ticket=…&clientId=…`, after minting a ticket via `/api/auth/sse-ticket`; typed `BrokerEvent` union in `client/src/types/broker.ts` |
 | `sdk/src/core/webrtc.ts` (SDK package) | peer connection, SDP exchange, data channel `pcm` glue |
 | `sdk/src/utils/pcm.ts` (SDK package) | Float32 ↔ Int16 LE conversion |
 | `lib/debug-log.ts`, `lib/client-id.ts` | debug polling, stable client id |
