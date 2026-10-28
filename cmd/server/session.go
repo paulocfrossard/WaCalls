@@ -137,7 +137,9 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 				"samples": len(pcm16),
 			})
 		}
-		_ = ac.bridge.WritePCM(pcm16)
+		if err := ac.bridge.WritePCM(pcm16); err != nil {
+			s.log.Debug("WritePCM failed", "err", err, "call_id", callID)
+		}
 	}
 }
 
