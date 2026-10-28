@@ -6,7 +6,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +22,19 @@ import (
 
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
+
+	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
+	mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
+	mux.HandleFunc("GET /api/auth/me", s.handleMe)
+	// Short-lived, single-use credential for EventSource (which cannot send
+	// headers); keeps long-lived session tokens out of URLs.
+	mux.HandleFunc("POST /api/auth/sse-ticket", s.handleSSETicket)
+
+	// API key management (admin only). Raw keys are only ever returned by the
+	// create call.
+	mux.HandleFunc("POST /api/auth/keys", s.requireRole("admin", s.handleApiKeyCreate))
+	mux.HandleFunc("GET /api/auth/keys", s.requireRole("admin", s.handleApiKeyList))
+	mux.HandleFunc("DELETE /api/auth/keys/{id}", s.requireRole("admin", s.handleApiKeyDelete))
 
 	mux.HandleFunc("GET /api/sessions", s.handleSessionList)
 	mux.HandleFunc("POST /api/sessions", s.handleSessionCreate)
@@ -34,29 +50,138 @@ func (s *server) routes() http.Handler {
 
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 
-	// Webhook management (outbound HTTP POST notifications). Same trust model
-	// as the rest of /api: no auth, LAN-facing. The payload itself is HMAC-
-	// signed so external receivers can verify authenticity — see docs/api.md.
+	// Webhook management (outbound HTTP POST notifications). Requires auth;
+	// the payload itself is HMAC-signed so external receivers can verify
+	// authenticity — see docs/api.md.
 	mux.HandleFunc("POST /api/webhooks", s.handleWebhookCreate)
 	mux.HandleFunc("GET /api/webhooks", s.handleWebhookList)
 	mux.HandleFunc("DELETE /api/webhooks/{id}", s.handleWebhookDelete)
 
-	// Debug log ring (fed by logbuf; toggle with -debug-log). Same trust
-	// model as the rest of /api: no auth, LAN-facing — see handleDebugLogs.
-	mux.HandleFunc("GET /api/debug/logs", s.handleDebugLogs)
+	// Debug log ring (fed by logbuf; toggle with -debug-log). Admin-only.
+	mux.HandleFunc("GET /api/debug/logs", s.requireRole("admin", s.handleDebugLogs))
 
 	if s.staticDir != "" {
 		if _, err := os.Stat(s.staticDir); err == nil {
-			mux.Handle("/", http.FileServer(http.Dir(s.staticDir)))
+			mux.Handle("/", s.spaHandler(s.staticDir))
 		}
 	}
-	return withCORS(mux)
+	return s.withCORS(s.authMiddleware(mux))
 }
 
-func withCORS(h http.Handler) http.Handler {
+// spaHandler serves the built client with history-API fallback:
+//
+//   - paths under /api/ are never static: unknown API routes get a JSON 404;
+//   - an existing file under dir is served as-is;
+//   - a missing path that has a file extension is a JSON 404 (no shell);
+//   - anything else is the SPA shell (index.html) for GET/HEAD;
+//   - other methods get 405.
+func (s *server) spaHandler(dir string) http.Handler {
+	root, err := filepath.Abs(dir)
+	if err != nil {
+		root = dir
+	}
+	root = filepath.Clean(root)
+	index := filepath.Join(root, "index.html")
+
+	notFound := func(w http.ResponseWriter) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Client-Id")
+		if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+			notFound(w)
+			return
+		}
+		// Reject Windows separator smuggling after URL-decoding: on Windows,
+		// "..\.." and percent-encoded "%5c" would otherwise reach the
+		// filesystem through filepath.FromSlash while path.Clean only knows
+		// about "/". Check the raw form too so double-encoded variants are
+		// refused as well.
+		decoded := r.URL.Path
+		if unescaped, uerr := url.PathUnescape(decoded); uerr == nil {
+			decoded = unescaped
+		}
+		if strings.ContainsRune(decoded, '\\') ||
+			strings.Contains(strings.ToLower(decoded), "%5c") ||
+			strings.Contains(strings.ToLower(r.URL.EscapedPath()), "%5c") ||
+			strings.Contains(strings.ToLower(r.URL.RawPath), "%5c") {
+			notFound(w)
+			return
+		}
+		// Clean the request path before touching the filesystem so ".."
+		// segments cannot escape the static root.
+		rel := strings.TrimPrefix(path.Clean("/"+decoded), "/")
+		if rel != "" {
+			abs := filepath.Clean(filepath.Join(root, filepath.FromSlash(rel)))
+			if !withinRoot(root, abs) {
+				notFound(w)
+				return
+			}
+			if serveStaticFile(w, r, abs) {
+				return
+			}
+		}
+		// A path that looks like a concrete asset (it has an extension) but did
+		// not resolve to a file is a missing asset, not a client-side route.
+		// Falling back to index.html would answer JS/CSS/image requests with
+		// HTML and hide the 404 from monitoring.
+		if rel != "" && filepath.Ext(rel) != "" {
+			notFound(w)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		if !serveStaticFile(w, r, index) {
+			notFound(w)
+		}
+	})
+}
+
+// withinRoot reports whether abs is root itself or lives underneath it. Both
+// paths are expected to be already cleaned.
+func withinRoot(root, abs string) bool {
+	if abs == root {
+		return true
+	}
+	prefix := root
+	if !strings.HasSuffix(prefix, string(os.PathSeparator)) {
+		prefix += string(os.PathSeparator)
+	}
+	return strings.HasPrefix(abs, prefix)
+}
+
+// serveStaticFile serves one already-resolved path, reporting whether it did.
+// It uses ServeContent (not ServeFile) so the response depends on the resolved
+// path rather than the raw request URL.
+func serveStaticFile(w http.ResponseWriter, r *http.Request, name string) bool {
+	f, err := os.Open(name)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		return false
+	}
+	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+	return true
+}
+
+// withCORS sets CORS headers. With no configured origins it falls back to a
+// wildcard (dev); otherwise it echoes only allowlisted request origins.
+func (s *server) withCORS(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(s.allowedOrigins) == 0 {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		} else if origin := r.Header.Get("Origin"); origin != "" && s.originAllowed(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Add("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Client-Id, Authorization, X-API-Key")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -64,6 +189,15 @@ func withCORS(h http.Handler) http.Handler {
 		}
 		h.ServeHTTP(w, r)
 	})
+}
+
+func (s *server) originAllowed(origin string) bool {
+	for _, allowed := range s.allowedOrigins {
+		if strings.EqualFold(strings.TrimSuffix(allowed, "/"), strings.TrimSuffix(origin, "/")) {
+			return true
+		}
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -191,10 +325,8 @@ func (s *server) handleWebhookDelete(w http.ResponseWriter, r *http.Request) {
 //
 // Poll with since=nextSeq to tail. limit is capped at 500 (default 100).
 //
-// SECURITY: like every /api route there is no authentication here (the whole
-// API relies on being unreachable outside the LAN). Exposing this port to the
-// internet leaks call IDs, SSRCs and audio-level telemetry to anyone — keep
-// the server on a trusted network or put it behind an authenticating proxy.
+// SECURITY: admin role required. The payload exposes call IDs, SSRCs and
+// audio-level telemetry, so keep the server on a trusted network as well.
 func (s *server) handleDebugLogs(w http.ResponseWriter, r *http.Request) {
 	since := int64(0)
 	if v := r.URL.Query().Get("since"); v != "" {
