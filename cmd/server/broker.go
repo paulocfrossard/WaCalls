@@ -60,6 +60,7 @@ type Broker struct {
 	snapshotMu    sync.RWMutex
 	snapshot      []any
 	snapshotDirty bool
+	snapshotGen   uint64
 
 	// computeMu serializes SnapshotFn computation to avoid double-compute
 	// under contention.
@@ -75,6 +76,7 @@ func NewBroker() *Broker {
 		subs:          map[*subscriber]struct{}{},
 		calls:         map[string]*CallRecord{},
 		snapshotDirty: true,
+		snapshotGen:   0,
 	}
 }
 
@@ -271,6 +273,7 @@ func (b *Broker) Snapshot() []any {
 		b.snapshotMu.RUnlock()
 		return out
 	}
+	gen := b.snapshotGen
 	b.snapshotMu.RUnlock()
 
 	// Compute outside snapshotMu so invalidations aren't blocked (M4).
@@ -285,8 +288,11 @@ func (b *Broker) Snapshot() []any {
 	if !b.snapshotDirty && b.snapshot != nil {
 		return append([]any(nil), b.snapshot...)
 	}
-	b.snapshot = evs
-	b.snapshotDirty = false
+	// Only cache if no invalidation occurred during compute.
+	if b.snapshotGen == gen {
+		b.snapshot = evs
+		b.snapshotDirty = false
+	}
 	if evs == nil {
 		return nil
 	}
@@ -296,6 +302,7 @@ func (b *Broker) Snapshot() []any {
 // invalidateSnapshot marks the cached SSE snapshot stale.
 func (b *Broker) invalidateSnapshot() {
 	b.snapshotMu.Lock()
+	b.snapshotGen++
 	b.snapshotDirty = true
 	b.snapshot = nil
 	b.snapshotMu.Unlock()
