@@ -28,9 +28,20 @@ func main() {
 	maxCalls := flag.Int("max-calls-per-session", 8, "max concurrent calls per session (0 = unlimited)")
 	authSRTP := flag.Bool("srtp-auth", true, "verify SRTP HMAC tag on receive (legacy: false)")
 	webhookAllowHosts := flag.String("webhook-allow-hosts", "", "comma-separated hostnames webhooks may target (empty = any host)")
+	adminUser := flag.String("admin-user", "admin", "bootstrap admin username (used only when the users table is empty)")
+	sessionTTL := flag.Duration("session-ttl", 24*time.Hour, "auth session lifetime")
+	allowedOrigins := flag.String("allowed-origins", os.Getenv("ALLOWED_ORIGINS"), "comma-separated CORS origins (empty = allow any origin; defaults to $ALLOWED_ORIGINS)")
+	authDisabled := flag.Bool("auth-disabled", false, "disable authentication on /api routes (insecure; dev only)")
+	cookieSecure := flag.Bool("cookie-secure", true, "mark session cookies Secure (disable for plain-HTTP dev)")
+	trustProxy := flag.Bool("trust-proxy", false, "trust X-Forwarded-For / X-Forwarded-Proto from a front proxy")
 	flag.Parse()
 	media.SetAuthVerify(*authSRTP)
 	logbuf.SetEnabled(*debugLog)
+
+	// The bootstrap password only comes from the environment: flags are visible
+	// in the process list. When the users table is empty this value is required;
+	// no password is generated or written to disk.
+	adminPassword := os.Getenv("WACALLS_ADMIN_PASSWORD")
 
 	var allowHosts []string
 	for _, h := range strings.Split(*webhookAllowHosts, ",") {
@@ -42,6 +53,14 @@ func main() {
 		h = strings.TrimPrefix(h, "[")
 		h = strings.TrimSuffix(h, "]")
 		allowHosts = append(allowHosts, h)
+	}
+
+	var origins []string
+	for _, o := range strings.Split(*allowedOrigins, ",") {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			origins = append(origins, o)
+		}
 	}
 
 	level := slog.LevelInfo
@@ -67,19 +86,46 @@ func main() {
 	}
 	verCancel()
 
-	srv, err := newServer(ctx, *dbPath, *staticDir, *maxCalls, allowHosts, log)
+	srv, err := newServer(ctx, serverOptions{
+		DBPath:            *dbPath,
+		StaticDir:         *staticDir,
+		MaxCalls:          *maxCalls,
+		WebhookAllowHosts: allowHosts,
+		AdminUser:         *adminUser,
+		AdminPass:         adminPassword,
+		SessionTTL:        *sessionTTL,
+		AllowedOrigins:    origins,
+		AuthDisabled:      *authDisabled,
+		CookieSecure:      *cookieSecure,
+		TrustProxy:        *trustProxy,
+	}, log)
 	if err != nil {
-		log.Error("startup failed", "err", err)
+		// The empty-database bootstrap failure is an operator-facing contract:
+		// log its message verbatim so it matches the documented startup error.
+		if errors.Is(err, errEmptyDatabaseNoAdminPassword) {
+			log.Error(err.Error())
+		} else {
+			log.Error("startup failed", "err", err)
+		}
 		os.Exit(1)
 	}
 	defer srv.sessions.disconnectAll()
+	defer srv.audit.Close()
 
 	if err := srv.sessions.Restore(ctx); err != nil {
 		log.Error("session restore failed", "err", err)
 		os.Exit(1)
 	}
 
-	httpSrv := &http.Server{Addr: *addr, Handler: srv.routes()}
+	httpSrv := &http.Server{
+		Addr:              *addr,
+		Handler:           srv.routes(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// WriteTimeout stays 0: it would cut long-lived SSE streams.
+		WriteTimeout: 0,
+	}
 	go func() {
 		log.Info("HTTP server listening", "addr", *addr)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
