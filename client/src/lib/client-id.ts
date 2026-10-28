@@ -2,7 +2,9 @@ const KEY = "wacalls.clientId";
 
 const generate = (): string => {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
-  return "c-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return "c-" + Array.from(bytes, (b) => b.toString(36)).join("") + Date.now().toString(36);
 };
 
 export const getClientId = (): string => {
