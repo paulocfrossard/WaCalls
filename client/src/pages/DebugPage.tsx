@@ -11,6 +11,7 @@ import { Copy, Terminal, TriangleAlert, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ApiError, apiFetch } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   ALERT_SOURCES,
@@ -233,7 +234,7 @@ export const DebugPage = () => {
   const setView = useUi((s) => s.setView);
 
   const [serverEvents, setServerEvents] = useState<DebugEvent[]>([]);
-  const [backend, setBackend] = useState<"unknown" | "ok" | "waiting">("unknown");
+  const [backend, setBackend] = useState<"unknown" | "ok" | "waiting" | "expired">("unknown");
   const [paused, setPaused] = useState(() => typeof document !== "undefined" && document.hidden);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [levelFilter, setLevelFilter] = useState<LevelFilter>("all");
@@ -254,7 +255,7 @@ export const DebugPage = () => {
     abortRef.current = ctrl;
     const timer = window.setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
     try {
-      const res = await fetch(`/api/debug/logs?since=${seqRef.current}&limit=${PAGE_LIMIT}`, {
+      const res = await apiFetch(`/api/debug/logs?since=${seqRef.current}&limit=${PAGE_LIMIT}`, {
         signal: ctrl.signal,
         headers: { Accept: "application/json" },
       });
@@ -288,7 +289,13 @@ export const DebugPage = () => {
       }
       setBackend("ok");
       return events.length;
-    } catch {
+    } catch (err) {
+      // A 401 is the session expiring, not a backend failure: apiFetch has
+      // already run hangup/logout and will redirect to the login gate.
+      if (err instanceof ApiError && err.status === 401) {
+        if (aliveRef.current) setBackend("expired");
+        return -1;
+      }
       // Endpoint missing, backend down or timeout → degrade gracefully.
       if (aliveRef.current) setBackend("waiting");
       return -1;
@@ -433,10 +440,16 @@ export const DebugPage = () => {
             "rounded-full border px-2 py-0.5 font-medium",
             backend === "ok"
               ? "border-primary/40 bg-primary/10 text-primary"
-              : "border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+              : backend === "expired"
+                ? "border-destructive/50 bg-destructive/10 text-destructive"
+                : "border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400",
           )}
         >
-          {backend === "ok" ? `backend ok · ${serverEvents.length} events` : "aguardando backend"}
+          {backend === "ok"
+            ? `backend ok · ${serverEvents.length} events`
+            : backend === "expired"
+              ? "session expired — redirecting to sign in"
+              : "aguardando backend"}
         </span>
         <span className="rounded-full border border-border px-2 py-0.5 font-medium text-muted-foreground">
           local {localEvents.length}
