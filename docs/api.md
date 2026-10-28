@@ -6,10 +6,13 @@ the expanded contract.
 
 > ## ⚠ Security posture
 >
-> **There is no authentication on any route** — including `/api/events` and
-> `/api/debug/logs`. `X-Client-Id` is an advisory operator id, **not a credential**.
-> CORS is `Access-Control-Allow-Origin: *`. The API relies entirely on being
-> unreachable outside a trusted LAN. See [security](./security.md).
+> **Every `/api/*` route requires authentication**, except `POST /api/auth/login`
+> and `POST /api/auth/logout`. Browser sessions authenticate with the `HttpOnly`
+> `wacalls_session` cookie set by login; API clients use an API key. The SSE stream
+> uses a short-lived one-time ticket (`?ticket=`) — see [Authentication](#authentication).
+> `X-Client-Id` remains an advisory operator id, **not a credential**. CORS allows
+> any origin by default; restrict it with `-allowed-origins`. See
+> [security](./security.md).
 
 ## Conventions
 
@@ -18,14 +21,88 @@ the expanded contract.
   with an `"error"` string unless noted.
 - All session-scoped routes use `{sid}` = session id from `GET /api/sessions`.
 - Operator identity: header `X-Client-Id: <id>` or query `?clientId=<id>` — used only
-  for single-operator conflict (409) on call start/accept.
+  for single-operator conflict (409) on call start/accept. It is **not** a credential.
+
+## Authentication
+
+All routes below require a credential unless marked public. `POST /api/auth/login`
+and `POST /api/auth/logout` are public; every other `/api/*` route is protected by
+`authMiddleware` (`cmd/server/auth.go`).
+
+### Credential precedence
+
+Send **one** credential. For REST routes the server reads them in this order
+(`cmd/server/auth.go`):
+
+1. `Authorization: Bearer <API key>` — API clients only. The browser never
+   receives a bearer token from login, so it does not use this header.
+2. `X-API-Key: <key>` — an API key.
+3. Cookie `wacalls_session` — set by login, `HttpOnly`, `SameSite=Lax`,
+   `Secure` by default.
+
+The SSE route (`GET /api/events`) is the exception: `EventSource` cannot set
+headers, so callers exchange their credential for a single-use `?ticket=` first.
+See [Server-sent events](#server-sent-events).
+
+A present-but-malformed `Authorization` header is rejected with `401`; it does not
+fall through to a weaker source. No REST route accepts a credential in the query
+string, which keeps secrets out of access logs and `Referer` headers.
+
+### Browser vs. API-client logins
+
+- **Browser (SPA):** `POST /api/auth/login` sets the `HttpOnly`
+  `wacalls_session` cookie and returns the user/expiry only — **no token in the
+  body**. Every subsequent request authenticates with the cookie the browser sends
+  automatically.
+- **API clients / scripts:** create an API key as an admin (`POST /api/auth/keys`)
+  and send it in `Authorization: Bearer <key>` or `X-API-Key`. There is no bearer
+  session token to copy out of a login response.
+
+CSRF guard: a non-GET request authenticated **by the session cookie** (no header
+credential) that carries an `Origin` header must have an `Origin` matching the
+request host or a configured `-allowed-origins` entry; otherwise the server
+returns `403`. Requests without an `Origin` header, and requests authenticated by
+`Authorization`/`X-API-Key`, are not CSRF-checked.
+
+### Auth and key routes
+
+| Method | Path | Body | Success | Errors | Notes |
+|---|---|---|---|---|---|
+| `POST` | `/api/auth/login` | `{"username": "...", "password": "..."}` | `201` `{"expiresAt", "user": {"id", "username", "role"}}` | `400` malformed JSON, `401` invalid credentials, `429` rate limited, `503` auth not configured | sets the `HttpOnly` `wacalls_session` cookie; **no token in the body** |
+| `POST` | `/api/auth/logout` | — | `204` | — | **public**; revokes the session carried by the request when a credential is supplied, and always clears the cookie |
+| `GET` | `/api/auth/me` | — | `200` `{"user": {"id", "username", "role"}}` | `401` | resolves the current credential |
+| `POST` | `/api/auth/sse-ticket` | — | `201` `{"ticket": "<hex>", "expiresAt": <unix ms>}` | `401` | mints a **single-use, 60 s** SSE ticket for any valid credential; use it as `GET /api/events?ticket=…` |
+| `POST` | `/api/auth/keys` | `{"name": "..."}` | `201` `{"id", "name", "key", "prefix", "createdAt"}` | `400`, `403` | **admin only**; the raw `key` is shown **once** |
+| `GET` | `/api/auth/keys` | — | `200` key metadata | `403` | **admin only**; no raw keys, no hashes |
+| `DELETE` | `/api/auth/keys/{id}` | — | `204` | `403`, `404` | **admin only**; revokes the key |
+
+### Roles
+
+| Role | Can do |
+|---|---|
+| `admin` | API key management (`/api/auth/keys*`) and `GET /api/debug/logs`; everything an operator can do |
+| `operator` | Everything else |
+
+### Status semantics
+
+- `401` — no credential, malformed `Authorization`, an unknown/expired/revoked
+  key, or an unknown/expired/already-used SSE ticket.
+- `403` — authenticated but not allowed: insufficient role, or a cookie-only write
+  from a disallowed `Origin`.
+- `429` — **login only**: more than **10 failed attempts/min per `(IP, username)`**,
+  **30 attempts/min per IP**, or **300 attempts/min globally**. A successful login
+  clears its `(IP, username)` bucket and refunds one unit from the IP and global
+  counters; failed attempts are never refunded. Other routes are not rate-limited.
+
+`-auth-disabled` (dev only) bypasses the middleware with a synthetic `admin`
+principal — never use it on a shared network.
 
 ## Sessions
 
 | Method | Path | Body | Success | Errors | Notes |
 |---|---|---|---|---|---|
-| `GET` | `/api/sessions` | — | `200` list of `{id, name, jid, status, paired}` | — | ordered by creation |
-| `POST` | `/api/sessions` | `{"name": "..."}` | `200` `{"id": "..."}` (pairing begins, QR via SSE) | — | creates account + starts QR |
+| `GET` | `/api/sessions` | — | `200` list of `{id, name, jid, state, paired}` | — | ordered by creation |
+| `POST` | `/api/sessions` | `{"name": "..."}` | `201` `{"id": "..."}` (pairing begins, QR via SSE) | — | creates account + starts QR |
 | `DELETE` | `/api/sessions/{sid}` | — | `204` | `404` | log out **and** remove the account |
 | `POST` | `/api/sessions/{sid}/logout` | — | `204` | `404` | disconnect, keep for re-pairing |
 | `POST` | `/api/sessions/{sid}/pair` | — | `204` | `404` | emit a fresh QR (`session-qr` event) |
@@ -58,9 +135,10 @@ connection required. Managed via `cmd/server/webhookstore.go` + `webhook_worker.
 | `GET` | `/api/webhooks` | — | `200` `{"webhooks": [{id, url, events, createdAt}]}` | — | **`secret` is never returned** (write-only) |
 | `DELETE` | `/api/webhooks/{id}` | — | `204` | `404` unknown id, `500` DB error | removes the webhook |
 
-Same trust model as the rest of `/api`: no authentication on these routes
-(LAN-facing). The authenticity of the outbound payload itself is guaranteed by
-the HMAC signature (below), not by the management API.
+These routes require the same credential as the rest of `/api` (see
+[Authentication](#authentication)); `-allowed-origins` and the CSRF rule apply
+too. The authenticity of the outbound payload itself is guaranteed by the HMAC
+signature (below), not by the management API.
 
 ### Event types eligible for webhooks
 
@@ -147,11 +225,30 @@ instead if you want the delivery retried.
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/api/events` | One SSE channel for everything. Client id from `?clientId=` (the client uses this) or `X-Client-Id`. |
+| `POST` | `/api/auth/sse-ticket` | Exchange any valid credential for `{"ticket", "expiresAt"}`. Single-use, 60 s TTL. |
+| `GET` | `/api/events` | One SSE channel for everything. **Requires authentication via `?ticket=`.** Client id from `?clientId=` (the client uses this) or `X-Client-Id`. |
 
-> Optional `apiKey` query param (`GET /api/events?clientId=…&apiKey=…`) is
-> **forward-compatible and ignored until backend enforcement lands** (`EventSource`
-> cannot send headers; the REST counterpart is `Authorization: Bearer <apiKey>`).
+Because `EventSource` cannot send headers, the SSE stream is authenticated with a
+**one-time ticket** — the only query credential the server accepts:
+
+```
+POST /api/auth/sse-ticket     # with cookie, Bearer API key, or X-API-Key
+→ 201 {"ticket": "<hex>", "expiresAt": <unix ms>}
+
+GET /api/events?ticket=<hex>&clientId=<id>
+```
+
+Rules:
+
+- A ticket is **single-use** and expires after **60 s**. Reuse or expiry returns
+  `401`; fetch a fresh ticket for every (re)connect.
+- The ticket is scoped to `GET /api/events` and carries the identity and role of
+  the credential that minted it.
+- Session tokens and API keys are **never accepted in the URL**. The only query
+  credential is a ticket — short-lived and single-use precisely so a leaked URL is
+  not a durable credential.
+- The browser obtains the ticket with `credentials: "include"` (cookie login). A
+  script can mint one with its API key and pass the ticket to `EventSource`.
 
 Payloads are JSON objects with a `type` discriminator (client union: `BrokerEvent` in
 `client/src/types/broker.ts`):
@@ -176,7 +273,7 @@ still show `ended`).
 
 | Method | Path | Success | Notes |
 |---|---|---|---|
-| `GET` | `/api/debug/logs` | `200` `{"events": [...], "nextSeq": N}` | Query: `since=<seq>` (default `0`), `limit` (default `100`, **cap `500`**). Tail with `since=nextSeq`. |
+| `GET` | `/api/debug/logs` | `200` `{"events": [...], "nextSeq": N}` | Query: `since=<seq>` (default `0`), `limit` (default `100`, **cap `500`**). Tail with `since=nextSeq`. Requires the `admin` role. |
 
 Event shape (`internal/voip/logbuf`): `{seq, ts, source, level, msg, fields?}`.
 Sources include `bridge-uplink`, `bridge-downlink`, plus client-side debug rows
@@ -185,17 +282,27 @@ mirrored via the UI. Gated by `-debug-log` (default `true`).
 ## Static client
 
 `GET /` serves files from `-static` (default `client/dist`) **only if the directory
-exists**; otherwise that route is not registered. The dev UI (Vite on `:5173`) is not
-part of this API — it proxies `/api` to `:3001`.
+exists**; otherwise that route is not registered. For non-`/api` paths without a
+matching static file, the fallback distinguishes the two cases:
+
+- **Path has a file extension** (e.g. `/assets/app.js`) → `404`, so probes and
+  monitoring still see a missing asset instead of an HTML shell.
+- **Path is extensionless** (e.g. `/login`) → `index.html`, so the client router
+  handles it.
+
+The dev UI (Vite on `:5173`) is not part of this API — it proxies `/api` to `:3001`.
 
 ## Error / status quick reference
 
 - `200` — success with body (or idempotent reject)
+- `201` — created (login, API key, session)
 - `204` — success, no body (delete/logout/pair/end call)
 - `400` — malformed request
-- `404` — unknown session or call
+- `401` — missing, malformed, expired, or revoked credential
+- `403` — authenticated but not allowed (role, or disallowed `Origin` on a cookie-only write)
+- `404` — unknown session, call, webhook, or key
 - `409` — operator busy / call already claimed
-- `429` — session call limit exceeded
-- `503` — session not paired
+- `429` — session call limit exceeded, or too many login attempts (10/min per IP + username, 30/min per IP, 300/min global)
+- `503` — session not paired, or auth not configured
 
-There is **no rate limiting** on any route.
+Only the login route is rate-limited. Everything else relies on a valid credential.
