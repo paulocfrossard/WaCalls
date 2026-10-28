@@ -19,14 +19,14 @@ Sessions and API keys are stored only as SHA-256 hashes. Admin bootstrap is
 **environment-only, fail-closed**: when the users table is empty the password must
 come from `WACALLS_ADMIN_PASSWORD`; if it is missing, startup aborts instead of
 creating a default or writing a password file. The password is bcrypt-hashed at
-cost 12 (`cmd/server/server.go`).
+cost 12 (`cmd/server/authstore.go`).
 
 ## Attack surface
 
 | Surface | Exposure | Impact if reachable by an attacker |
 |---|---|---|
-| All `/api/*` routes | **Auth required** (`Authorization: Bearer <API key>`, `X-API-Key`, or the `wacalls_session` HttpOnly cookie); login limited to 10 failed/min per `(IP, username)`, 30/min per IP, and 300/min globally; CORS `*` by default — restrict with `-allowed-origins` | With `operator` credentials: create/delete sessions (WhatsApp accounts), place/receive/end calls, read call history and peer numbers. With `admin`: also manage API keys and read diagnostics |
-| `GET /api/events` (SSE) | **Auth required via a single-use `?ticket=`** (60 s TTL) minted by `POST /api/auth/sse-ticket` (EventSource cannot set headers). A leaked URL is only briefly replayable | Real-time surveillance of session pairing, call lifecycle, peer metadata |
+| All `/api/*` routes | **Auth required** (`Authorization: Bearer <session token or API key>`, `X-API-Key`, or the `wacalls_session` HttpOnly cookie); login limited to 10 failed/min per `(IP, username)`, 30/min per IP, and 300/min globally; CORS `*` by default — restrict with `-allowed-origins` | With `operator` credentials: create/delete sessions (WhatsApp accounts), place/receive/end calls, read call history and peer numbers. With `admin`: also manage API keys and read diagnostics |
+| `GET /api/events` (SSE) | **Auth required**: a single-use `?ticket=` (60 s TTL) minted by `POST /api/auth/sse-ticket`, or the session cookie when no ticket is supplied (EventSource cannot set headers). A leaked URL is only briefly replayable | Real-time surveillance of session pairing, call lifecycle, peer metadata |
 | `POST/GET/DELETE /api/webhooks` | **Auth required** (operators can register); a webhook URL still lets any authenticated caller cause outbound requests | **Server-side request forgery (SSRF) egress**: the server sends signed POSTs to any http/https URL the caller supplies, including internal hosts (`http://10.x/...`), loopback services, and cloud metadata (`http://169.254.169.254/...`). Delivery is blind (no response body is echoed back), so this is a side-effect/egress vector, not an exfiltration channel — but it can trigger internal actions and, if the receiver echoes data elsewhere, aid pivoting |
 | `GET /api/debug/logs` | **Auth required, `admin` role only** (`-debug-log`, default **on**) | Leak of call IDs, SSRCs, audio-level telemetry, ICE/DC states |
 | `GET /` static files | Public (assets + SPA fallback, including `/login`); only when `-static` dir exists | Low — serves the SPA bundle only |
