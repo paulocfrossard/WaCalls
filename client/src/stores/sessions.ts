@@ -20,40 +20,52 @@ const pickActive = (sessions: SessionInfo[], current: string | null): string | n
 };
 
 let wired = false;
+
+/** Session frames ride the raw broker:event passthrough (the SDK types only
+ *  call lifecycle events). Kept module-scoped so resetSessionsWiring can off() it. */
+const onBroker = (raw: Record<string, unknown>): void => {
+  const ev = asBrokerEvent(raw);
+  if (ev.type === "session-list") {
+    useSessions.setState((s) => {
+      const ids = new Set(ev.sessions.map((x) => x.id));
+      const qrs: Record<string, string> = {};
+      for (const [id, qr] of Object.entries(s.qrs)) if (ids.has(id)) qrs[id] = qr;
+      return { sessions: ev.sessions, qrs, activeId: pickActive(ev.sessions, s.activeId) };
+    });
+  } else if (ev.type === "session-qr") {
+    useSessions.setState((s) => ({ qrs: { ...s.qrs, [ev.sessionId]: ev.qr } }));
+  } else if (ev.type === "auth-state") {
+    useSessions.setState((s) => {
+      const sessions = s.sessions.map((x) =>
+        x.id === ev.sessionId ? { ...x, state: ev.state, paired: ev.paired } : x,
+      );
+      const qrs = { ...s.qrs };
+      if (ev.paired) delete qrs[ev.sessionId];
+      else if (ev.qr) qrs[ev.sessionId] = ev.qr;
+      if (ev.state === "logged_out" || !ev.qr) delete qrs[ev.sessionId];
+      return { sessions, qrs };
+    });
+  }
+};
+
 export const ensureSessionsWired = (): void => {
   if (wired) return;
   wired = true;
   // The SDK owns the single EventSource (auto-reconnecting until disconnect()).
   sdkClient.connect();
+  sdkClient.on("broker:event", onBroker);
 
   void listSessions()
     .then((sessions) => useSessions.setState((s) => ({ sessions, activeId: pickActive(sessions, s.activeId) })))
     .catch(() => {});
+};
 
-  // Session frames ride the raw broker:event passthrough (the SDK types only
-  // call lifecycle events).
-  sdkClient.on("broker:event", (raw) => {
-    const ev = asBrokerEvent(raw);
-    if (ev.type === "session-list") {
-      useSessions.setState((s) => {
-        const ids = new Set(ev.sessions.map((x) => x.id));
-        const qrs: Record<string, string> = {};
-        for (const [id, qr] of Object.entries(s.qrs)) if (ids.has(id)) qrs[id] = qr;
-        return { sessions: ev.sessions, qrs, activeId: pickActive(ev.sessions, s.activeId) };
-      });
-    } else if (ev.type === "session-qr") {
-      useSessions.setState((s) => ({ qrs: { ...s.qrs, [ev.sessionId]: ev.qr } }));
-    } else if (ev.type === "auth-state") {
-      useSessions.setState((s) => {
-        const sessions = s.sessions.map((x) =>
-          x.id === ev.sessionId ? { ...x, state: ev.state, paired: ev.paired } : x,
-        );
-        const qrs = { ...s.qrs };
-        if (ev.paired) delete qrs[ev.sessionId];
-        else if (ev.qr) qrs[ev.sessionId] = ev.qr;
-        if (ev.state === "logged_out" || !ev.qr) delete qrs[ev.sessionId];
-        return { sessions, qrs };
-      });
-    }
-  });
+/**
+ * Detach this store from the SDK and drop all session state. Idempotent: a
+ * later ensureSessionsWired() (new login) registers exactly one listener again.
+ */
+export const resetSessionsWiring = (): void => {
+  if (wired) sdkClient.off("broker:event", onBroker);
+  wired = false;
+  useSessions.setState({ sessions: [], qrs: {}, activeId: null });
 };
