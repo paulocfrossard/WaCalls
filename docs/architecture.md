@@ -53,9 +53,9 @@ callrouting, broker, sessionmanager, debuglogs, callregistry).
 ## Authentication
 
 `server.routes()` wraps the `/api` surface in `authMiddleware` (`cmd/server/auth.go`).
-REST requests authenticate with `Authorization: Bearer <API key>`, `X-API-Key`, or
-the `wacalls_session` cookie; the middleware rejects a malformed `Authorization`
-header with `401` instead of falling through. Sessions and API keys are stored as
+REST requests authenticate with `Authorization: Bearer <session token or API key>`,
+`X-API-Key`, or the `wacalls_session` cookie; the middleware rejects a malformed
+`Authorization` header with `401` instead of falling through. Sessions and API keys are stored as
 SHA-256 hashes and looked up by hash.
 
 **Browser login is cookie-only.** `POST /api/auth/login` sets the `HttpOnly`
@@ -66,8 +66,8 @@ admin-issued API keys instead.
 **SSE uses a one-time ticket.** `EventSource` cannot set headers, so the client
 calls `POST /api/auth/sse-ticket` with its cookie (or an API key) to mint a
 single-use, 60 s ticket, then connects to `GET /api/events?ticket=…`. The ticket is
-consumed on use and scoped to that route; no other query-string credential is
-accepted.
+consumed on use and scoped to that route; with no ticket the stream falls back to
+the session cookie, and no other query-string credential is accepted.
 
 Public routes — reachable without a valid session — are `POST /api/auth/login`,
 `POST /api/auth/logout`, and everything outside `/api/` (static assets + SPA
@@ -112,7 +112,7 @@ Call statuses in SSE events: `starting | ringing | connected | ended`
 No client-side router — navigation is component state (`pages/CallsPage`,
 `pages/DebugPage`). State is split deliberately:
 
-- **Zustand stores** (`stores/`: calls, sessions, devices, ui, theme) — local/UI/device state.
+- **Zustand stores** (`stores/`: calls, sessions, devices, ui, theme, auth) — local/UI/device/session-auth state.
 - **TanStack Query** (`lib/query.ts` + `hooks/`) — server state (sessions, history, mutations).
 
 Key libraries:
