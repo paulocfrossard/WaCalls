@@ -196,21 +196,26 @@ cd client && npm ci && cd ..
 ### Run
 
 ```bash
-go run ./cmd/server -addr :8080          # add -debug for verbose logs
+WACALLS_ADMIN_PASSWORD='choose-a-strong-one' go run ./cmd/server -addr :8080
+# add -debug for verbose logs
 ```
 
 Live audio works out of the box — the MLow codec is pure Go, so a plain build
 includes it. No build tags, no `CGO_ENABLED`, no DLLs.
 
-Open `http://localhost:8080`, click **New session**, and scan the QR shown in the browser
+Open `http://localhost:8080`, sign in at `/login`, click **New session**, and scan the QR shown in the browser
 (it is also printed in the terminal) with **WhatsApp → Linked devices**. Add more accounts
 the same way and switch between them in the sidebar.
+
+> **First boot:** the admin user (`-admin-user`, default `admin`) gets its password
+> from `WACALLS_ADMIN_PASSWORD`. It is **required** while the users table is empty:
+> startup aborts if it is unset. See `.env.example` for a copyable template.
 
 ### React client in dev mode
 
 ```bash
 # the Vite dev proxy targets :3001 — start the backend on that port
-go run ./cmd/server -addr :3001
+WACALLS_ADMIN_PASSWORD=changeme go run ./cmd/server -addr :3001   # only needed while users table is empty
 
 cd client
 npm run dev      # Vite on :5173, proxies /api → http://localhost:3001
@@ -220,7 +225,7 @@ For production, build the static client and serve it from the Go server:
 
 ```bash
 cd client && npm run build && cd ..
-go run ./cmd/server -static client/dist -addr :8080
+WACALLS_ADMIN_PASSWORD=changeme go run ./cmd/server -static client/dist -addr :8080
 ```
 
 ### Server flags
@@ -235,17 +240,34 @@ go run ./cmd/server -static client/dist -addr :8080
 | `-max-calls-per-session` | `8` | Max concurrent calls per session (`0` = unlimited) |
 | `-srtp-auth` | `true` | Verify the SRTP HMAC tag on receive (`false` = legacy no-verify) |
 | `-webhook-allow-hosts` | `""` | Comma-separated hostnames webhooks may target (`""` = any host) |
+| `-admin-user` | `admin` | Bootstrap admin username (used only when the users table is empty) |
+| `-session-ttl` | `24h` | Auth session lifetime |
+| `-allowed-origins` | `""` | Comma-separated CORS origins (`""` = allow any origin) |
+| `-cookie-secure` | `true` | Mark session cookies `Secure`; set `false` for plain-HTTP dev |
+| `-trust-proxy` | `false` | Honor `X-Forwarded-For` / `X-Forwarded-Proto` from a front proxy |
+| `-auth-disabled` | `false` | Disable auth on `/api` routes (insecure; dev only) |
+
+The admin bootstrap password is an environment variable (`WACALLS_ADMIN_PASSWORD`),
+not a flag, and is required for the first boot: with an empty users table and the
+variable unset, the server aborts at startup. See `.env.example`. The value is
+bcrypt-hashed at cost 12; bcrypt accepts at most 72 bytes.
 
 ---
 
 ## API
 
-All routes are session-scoped. Events stream over a single SSE channel, tagged with the
-originating `sessionId`.
+**The API requires login:** `POST /api/auth/login` sets the `HttpOnly`
+`wacalls_session` cookie and returns only `{expiresAt, user}` — no token in the body.
+Every other `/api` route authenticates with that cookie, or with an API key
+(`Authorization: Bearer` / `X-API-Key`) for scripts. The SSE stream uses a
+single-use `?ticket=` — see [the authentication section](./docs/api.md#authentication).
+
+All session routes are scoped to a session. Events stream over a single SSE channel,
+tagged with the originating `sessionId`.
 
 | Method | Route | Purpose |
 |---|---|---|
-| `GET` | `/api/sessions` | List accounts (id, name, jid, status, paired) |
+| `GET` | `/api/sessions` | List accounts (id, name, jid, state, paired) |
 | `POST` | `/api/sessions` | Create an account and begin QR pairing |
 | `DELETE` | `/api/sessions/{sid}` | Log out and remove an account |
 | `POST` | `/api/sessions/{sid}/logout` | Disconnect an account (keep it for re-pairing) |
@@ -284,9 +306,14 @@ cd client && npm run build    # client type-check + production build
 
 ## Security
 
-The API has **no authentication** — anyone with HTTP access can create accounts, place
-calls, and read history. **Run it only on a trusted LAN.** `wacalls.db` holds WhatsApp
-session credentials (secrets): **do not commit it** and keep it protected.
+The API **requires authentication** — the `HttpOnly` session cookie set by
+`POST /api/auth/login` (cookie-only for the browser) or an admin-issued API key for
+scripts; SSE uses a single-use ticket. Failed logins are limited to 10/min per
+IP+username, 30/min per IP, and 300/min globally, and cookies can be pinned with
+`-cookie-secure`/`-allowed-origins`. Even so, **run it only on a trusted LAN** and
+keep it behind a TLS reverse proxy for remote access. `wacalls.db` holds WhatsApp
+session credentials (secrets): **do not commit it** and keep it protected. Full
+posture: [docs/security](./docs/security.md).
 
 ---
 
