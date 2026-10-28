@@ -29,7 +29,16 @@ export interface WaCallsConfig {
   baseUrl: string;
   /** Stable operator/client identifier (sent as X-Client-Id + SSE clientId). */
   clientId: string;
-  /** Optional bearer token (REST) / query param (SSE — EventSource has no headers). */
+  /** Session token: REST `Authorization: Bearer` only. The SSE stream uses a
+   *  short-lived ticket (see `ticketProvider`) or the session cookie. Takes
+   *  precedence over `apiKey` for REST when both are set. */
+  token?: string;
+  /** Optional async provider for a single-use SSE ticket. When set, the SDK
+   *  awaits it on every (re)connect and appends `?ticket=<ticket>`; on failure
+   *  it opens the stream cookie-only (no query credential). */
+  ticketProvider?: () => Promise<string>;
+  /** Optional API key (backwards compatible): REST bearer only. Ignored when
+   *  `token` is set. Never sent as an SSE query credential. */
   apiKey?: string;
   /** Optional exact microphone deviceId for all calls opened by this client. */
   micId?: string | null;
@@ -137,6 +146,9 @@ export class WaCallsClient {
   readonly #cfg: Required<Pick<WaCallsConfig, "baseUrl" | "clientId">> & WaCallsConfig;
   readonly #emitter = new Emitter<WaCallsClientEvents>();
   #es: EventSource | null = null;
+  /** True while a ticket is being fetched and the EventSource is not created
+   *  yet: prevents two concurrent opens from racing past the `#es` guard. */
+  #opening = false;
   #reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   #reconnectMs = RECONNECT_BASE_MS;
   #stopped = true;
@@ -211,9 +223,32 @@ export class WaCallsClient {
   }
 
   #openEventSource(): void {
+    if (this.#stopped || this.#es || this.#opening) return;
+    this.#opening = true;
+    void this.#openEventSourceAsync().finally(() => {
+      this.#opening = false;
+    });
+  }
+
+  async #openEventSourceAsync(): Promise<void> {
     if (this.#stopped || this.#es) return;
     const params = new URLSearchParams({ clientId: this.#cfg.clientId });
-    if (this.#cfg.apiKey) params.set("apiKey", this.#cfg.apiKey);
+    // No API key / token in the URL (access-log / Referer leakage). The only
+    // query credential is a short-lived single-use ticket; otherwise the
+    // stream authenticates cookie-only.
+    if (this.#cfg.ticketProvider) {
+      try {
+        const ticket = await this.#cfg.ticketProvider();
+        if (typeof ticket === "string" && ticket.trim() !== "") {
+          params.set("ticket", ticket);
+        }
+      } catch {
+        // No ticket: fall back to the session cookie (no query credential).
+      }
+    }
+    // Re-check after the await: disconnect()/setToken(null) may have run, or
+    // another open may have won the race while the ticket was in flight.
+    if (this.#stopped || this.#es) return;
     const url = `${this.#cfg.baseUrl}/api/events?${params.toString()}`;
 
     let es: EventSource;
@@ -400,6 +435,23 @@ export class WaCallsClient {
     }
   }
 
+  /**
+   * End the locally-open call (if any) through the normal hangup REST call.
+   *
+   * Logout uses this so the DELETE still carries the session token BEFORE the
+   * auth store clears it. Best effort: hangup() tears the call down locally in
+   * its `finally`, so a failed/expired DELETE never keeps media alive.
+   */
+  async hangupActive(): Promise<void> {
+    const active = this.#active;
+    if (!active || !this.activeOpenCall) return;
+    try {
+      await this.hangup(active.sessionId, active.callId);
+    } catch {
+      // Local teardown already happened in hangup()'s finally block.
+    }
+  }
+
   /** Mute/unmute the mic (track.enabled negation); stores the desired state
    *  and applies it to freshly opened mics as well. */
   toggleMute(isMuted: boolean): void {
@@ -416,6 +468,43 @@ export class WaCallsClient {
   /** Change the mic used for subsequently opened calls (null = default). */
   setMicId(micId: string | null): void {
     this.#cfg.micId = micId;
+  }
+
+  /**
+   * Replace the session token (REST Authorization only; SSE uses the
+   * ticketProvider/cookie) and reopen the live event stream in place when it
+   * is already connected.
+   *
+   * Passing `null` clears the bearer and closes the stream WITHOUT reopening
+   * it: with no ticket provider an unauthenticated EventSource would only get
+   * 401 and spin in the reconnect loop. A later connect() (or a new setToken)
+   * reopens it. An active call is never torn down by a token rotation.
+   */
+  setToken(token: string | null): void {
+    const next = typeof token === "string" && token.trim() !== "" ? token : undefined;
+    this.#cfg.token = next;
+    if (!next) {
+      // Clearing the credential must stop the stream even when it is not
+      // currently open: a pending backoff timer would otherwise fire and open
+      // an unauthenticated EventSource (401 + endless reconnects). Set this
+      // BEFORE the early return below. A later connect() sets #stopped=false
+      // again, so a fresh token can reopen the stream.
+      this.#stopped = true;
+      if (this.#reconnectTimer !== null) {
+        clearTimeout(this.#reconnectTimer);
+        this.#reconnectTimer = null;
+      }
+    }
+    const es = this.#es;
+    if (!es) return; // not connected: the next connect() picks up the config
+    es.close();
+    this.#es = null;
+    if (this.#reconnectTimer !== null) {
+      clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = null;
+    }
+    this.#reconnectMs = RECONNECT_BASE_MS;
+    if (next) this.#openEventSource();
   }
 
   /** Change the output device; immediately re-routes the active downlink.
@@ -547,7 +636,9 @@ export class WaCallsClient {
       "Content-Type": "application/json",
       "X-Client-Id": this.#cfg.clientId,
     };
-    if (this.#cfg.apiKey) h["Authorization"] = `Bearer ${this.#cfg.apiKey}`;
+    // Session token wins over the legacy apiKey when both are configured.
+    const bearer = this.#cfg.token || this.#cfg.apiKey;
+    if (bearer) h["Authorization"] = `Bearer ${bearer}`;
     return h;
   }
 
@@ -556,6 +647,9 @@ export class WaCallsClient {
     const res = await fetch(url, {
       method,
       headers: this.#headers(),
+      // Send the HttpOnly session cookie when no bearer is configured, so a
+      // cookie-only session authenticates REST calls.
+      credentials: "include",
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     if (!res.ok) {
