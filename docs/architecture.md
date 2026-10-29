@@ -112,14 +112,14 @@ The choices behind the surface above. **(implemented)** is shipped;
    transient ticks (~60 s). Revocation via the broker channel (logout, API-key
    revoke) is independent of the keepalive.
 
-5. **RBAC (current).** Roles are `admin` and `operator`. Webhooks move to
-   `admin` because outbound URLs are an SSRF/egress surface.
+5. **RBAC (current).** Roles are `admin` and `operator`. Webhooks are
+   `admin`-only because outbound URLs are an SSRF/egress surface.
 
    | Surface | Current | Target |
    |---|---|---|
    | API keys (`/api/auth/keys*`), debug logs | `admin` | `admin` |
    | Sessions, calls, history, events | `operator` | `operator` |
-   | Webhooks (`/api/webhooks*`) | any authenticated | `admin` |
+   | Webhooks (`/api/webhooks*`) | `admin` | `admin` |
 
    Session management stays `operator` because it is the product's main flow. Per-user
    ownership on the `sessions` table is deferred; the system is single-tenant.
