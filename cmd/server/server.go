@@ -16,6 +16,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// authRevalidateTimeout bounds the read-only keepalive revalidation query so a
+// stalled database cannot pin a stream goroutine.
+const authRevalidateTimeout = 2 * time.Second
+
 type server struct {
 	broker    *Broker
 	sessions  *SessionManager
@@ -128,6 +132,17 @@ func newServer(ctx context.Context, opts serverOptions, log *slog.Logger) (*serv
 	}
 
 	broker := NewBroker()
+	// SSE keepalive revalidation is read-only and fail-closed: any DB error
+	// closes the stream on the next tick instead of extending it.
+	broker.authCheck = func(sessionID, keyID string) bool {
+		if auth == nil {
+			return false
+		}
+		checkCtx, cancel := context.WithTimeout(context.Background(), authRevalidateTimeout)
+		defer cancel()
+		return auth.revalidatePrincipal(checkCtx, sessionID, keyID)
+	}
+	broker.StartRevocations(ctx)
 	worker := newWebhookWorker(whStore, log, opts.WebhookAllowHosts)
 	broker.Dispatcher = worker
 	worker.Start(ctx, 5)
