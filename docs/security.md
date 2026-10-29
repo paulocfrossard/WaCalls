@@ -40,7 +40,9 @@ cost 12 (`cmd/server/authstore.go`).
   call start/accept is the authenticated user (`user:<userID>`): an account holds at
   most one active outgoing/accepted call across tabs and devices, so a second
   start/accept returns HTTP 409. In `-auth-disabled` mode the bucket is
-  `client:<clientID>`. The id is **not verified**, not a credential — authentication is
+  `client:<clientID>`, falling back to the peer IP when no `X-Client-Id`/`?clientId=`
+  is supplied, so id-less callers do not collapse into a single bucket. The id is
+  **not verified**, not a credential — authentication is
   a separate layer (API key or session cookie).
 
 ## Session cookie and SSE tickets
@@ -112,8 +114,9 @@ and **delivery** (worker re-validates and skips). Hostnames are matched
 case-insensitively; any port is allowed. IPv6 bracket notation (`[::1]`) is
 normalized when parsing the flag.
 
-**Residual risk:** with an empty allowlist, SSRF remains possible (any
-authenticated caller can register `http://169.254.169.254/...`). DNS rebinding of an
+**Residual risk:** with an empty allowlist, SSRF remains possible (an admin can
+register `http://169.254.169.254/...` — webhook routes are `requireRole("admin")`,
+so the exposure requires an admin account, not just any valid credential). DNS rebinding of an
 allowlisted hostname (resolving to an internal IP at delivery time) is out of
 scope — the worker does not resolve hosts, it only string-compares the
 hostname.
