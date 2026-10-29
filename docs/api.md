@@ -24,7 +24,8 @@ the expanded contract.
   and stream identity only. It is **not** the conflict key: call start/accept is bucketed
   per authenticated user (`user:<userID>`), so an account holds one active
   outgoing/accepted call across tabs and devices (`409` otherwise); in `-auth-disabled`
-  mode the bucket is `client:<clientID>`. It is **not** a credential.
+  mode the bucket is `client:<clientID>`, falling back to the peer IP when no client id
+  is supplied. It is **not** a credential.
 
 ## Authentication
 
