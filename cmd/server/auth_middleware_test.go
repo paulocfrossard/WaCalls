@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -436,5 +438,78 @@ func TestAuthMiddlewareSSETicketSingleUse(t *testing.T) {
 	replay := doAuthMwRequest(h, httptest.NewRequest(http.MethodGet, "/api/events?ticket="+ticket, nil))
 	if replay.Code != http.StatusUnauthorized {
 		t.Fatalf("replayed ticket: got %d, want 401 (body=%s)", replay.Code, replay.Body.String())
+	}
+}
+
+// randomHex64 returns a 64-character hex string, the shape of a real SSE
+// ticket, so an "unknown ticket" case cannot be rejected merely for being
+// malformed.
+func randomHex64(t *testing.T) string {
+	t.Helper()
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatalf("random ticket: %v", err)
+	}
+	return hex.EncodeToString(b)
+}
+
+// TestAuthMiddlewareSSETicketUnknownRejected covers a well-formed ticket that
+// was never issued: the middleware must answer 401 instead of opening a stream
+// or falling through to another credential source.
+func TestAuthMiddlewareSSETicketUnknownRejected(t *testing.T) {
+	s, _ := newAuthMiddlewareTestServer(t)
+	h := s.routes()
+
+	rec := doAuthMwRequest(h, httptest.NewRequest(http.MethodGet, "/api/events?ticket="+randomHex64(t), nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unknown ticket on /api/events: got %d, want 401 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "unauthorized") {
+		t.Fatalf("unknown ticket 401 body = %q, want an unauthorized error", rec.Body.String())
+	}
+}
+
+// TestAuthMiddlewareSSETicketExpiredRejected mints a real ticket and then ages
+// the stored entry so it is already past its expiresAt. The consume path must
+// reject it and delete the entry (expired tickets are pruned on sight), so a
+// replay is rejected as well.
+func TestAuthMiddlewareSSETicketExpiredRejected(t *testing.T) {
+	s, st := newAuthMiddlewareTestServer(t)
+	const token = "expired-ticket-token"
+	seedAuthMwUser(t, st, "user-expired-ticket", "frank", "pw-frank", "operator")
+	seedAuthMwSession(t, st, "user-expired-ticket", token, time.Hour)
+	h := s.routes()
+
+	ticket := mintAuthMwSSETicket(t, h, token)
+	hash := sha256Hex(ticket)
+
+	// Age the stored entry under the same lock the server uses. The struct field
+	// is a time.Time; the public API only exposes unix millis.
+	s.sseTicketMu.Lock()
+	entry, ok := s.sseTickets[hash]
+	if !ok || entry == nil {
+		s.sseTicketMu.Unlock()
+		t.Fatalf("minted ticket %q is not present in sseTickets", ticket)
+	}
+	entry.expiresAt = time.Now().Add(-time.Minute)
+	s.sseTicketMu.Unlock()
+
+	rec := doAuthMwRequest(h, httptest.NewRequest(http.MethodGet, "/api/events?ticket="+ticket, nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expired ticket on /api/events: got %d, want 401 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	// Expired tickets are deleted on consume, so the map must no longer hold it
+	// and a replay must be rejected too.
+	s.sseTicketMu.Lock()
+	_, stillThere := s.sseTickets[hash]
+	s.sseTicketMu.Unlock()
+	if stillThere {
+		t.Fatalf("expired ticket %q was not removed from sseTickets", ticket)
+	}
+
+	replay := doAuthMwRequest(h, httptest.NewRequest(http.MethodGet, "/api/events?ticket="+ticket, nil))
+	if replay.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed expired ticket: got %d, want 401 (body=%s)", replay.Code, replay.Body.String())
 	}
 }
