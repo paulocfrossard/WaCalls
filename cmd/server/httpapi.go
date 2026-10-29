@@ -628,10 +628,15 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 	}
 	if !s.broker.setOwner(id, recordOwner, ownerKey) {
 		// Compensation: the call was accepted but could not be claimed; end it
-		// so no accepted, unowned call lingers in the registry.
-		_ = ac.cm.EndCall(r.Context(), core.EndCallReasonUserEnded)
-		sess.removeCall(id)
-		s.broker.endCall(id, string(core.EndCallReasonUserEnded))
+		// so no accepted, unowned call lingers in the registry. When the call
+		// is already owned by a different bucket, ending it would tear down
+		// that bucket's live call — leave it untouched and just report the
+		// conflict.
+		if otherKey, ok := s.broker.callOwnerKey(id); !ok || otherKey == "" || otherKey == ownerKey {
+			_ = ac.cm.EndCall(r.Context(), core.EndCallReasonUserEnded)
+			sess.removeCall(id)
+			s.broker.endCall(id, string(core.EndCallReasonUserEnded))
+		}
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
 		return
 	}
