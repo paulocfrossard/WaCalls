@@ -128,6 +128,14 @@ principal — never use it on a shared network.
 |---|---|---|---|
 | `GET` | `/api/sessions/{sid}/history` | `200` rows | **Fixed window: last 50 records.** No pagination. |
 
+Rows are scoped to the authenticated principal **before** the 50-record cap
+(`cmd/server/callvisibility.go`): `admin` (and `-auth-disabled`) receives every
+row for the session; an `operator` receives only rows whose `ownerKey` is
+`user:<ownUserID>` — other operators' rows and `client:<id>` / `client:<ip>`
+orphans are excluded, and an empty/unknown role fails closed. Filtering is
+server-side only: each row's `owner` (raw client id) is unchanged and
+`ownerKey` is never returned.
+
 ## Webhooks (outbound notifications)
 
 External receivers (e.g. a Chatwoot integration) can register URLs that receive
@@ -275,6 +283,13 @@ Call `status` values: `starting`, `ringing`, `connected`, `ended`
 (`cmd/server/broker.go`). The `call-status` **event** never carries
 `status: "ended"` — teardown arrives only as `call-ended` (history rows may
 still show `ended`).
+
+`call-list` is scoped per subscriber: the initial snapshot on connect and every
+subsequent broadcast are filtered server-side, so `admin` and `-auth-disabled`
+receive all active calls (including `client:<id>` / `client:<ip>` orphans) while
+an `operator` receives only calls bucketed `user:<ownUserID>`; an empty/unknown
+role fails closed. The row `owner` field stays the raw client id (UI "my call"
+check) and `ownerKey` is never serialized.
 
 ## Debug logs
 
