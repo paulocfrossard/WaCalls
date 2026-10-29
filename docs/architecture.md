@@ -105,7 +105,12 @@ The choices behind the surface above. **(implemented)** is shipped;
 
 4. **SSE revalidation and revocation (implemented).** Subscribers carry
    `sessionID` / `keyID` / `userID`; a revocation channel closes matching streams
-   immediately; the 20 s keepalive revalidates read-only, fail-closed.
+   immediately. Every 20 s the keepalive revalidates the session or API key with a
+   read-only indexed `SELECT` on a single SQLite connection (~500 ms budget):
+   valid → ping; invalid (missing/revoked/expired) → close immediately; a transient
+   DB error or timeout is tolerated, but the stream closes after **3 consecutive**
+   transient ticks (~60 s). Revocation via the broker channel (logout, API-key
+   revoke) is independent of the keepalive.
 
 5. **RBAC (current).** Roles are `admin` and `operator`. Webhooks move to
    `admin` because outbound URLs are an SSRF/egress surface.
@@ -118,6 +123,11 @@ The choices behind the surface above. **(implemented)** is shipped;
 
    Session management stays `operator` because it is the product's main flow. Per-user
    ownership on the `sessions` table is deferred; the system is single-tenant.
+
+   Call ownership is bucketed per authenticated user (`user:<userID>`), so one account
+   holds at most one active outgoing/accepted call across all tabs and devices.
+   `X-Client-Id` is advisory for UI stream identity only and never creates a separate
+   bucket; auth-disabled mode falls back to `client:<clientID>` (`cmd/server/httpapi.go:216`).
 
 ## `internal/` modules
 
@@ -176,8 +186,8 @@ Imports use the `@/` alias → `client/src` (configured in `vite.config.ts`).
   over the data channel without the core knowing the transport (core only sees
   `[]float32` PCM).
 - Per-session call limit enforced at the HTTP layer (`-max-calls-per-session`, default 8).
-- Single-operator conflict: `X-Client-Id` (header or `?clientId=`) is **advisory**, used
-  only to refuse a second concurrent operator on the same session (409) — not a credential.
+- Single-account conflict: a second start/accept from the same authenticated account is
+  refused (409) whatever the `X-Client-Id` — the bucket is `user:<userID>`, not a credential.
 - The SSE broker fans out per principal; clients reconnect with the same id to reduce
   duplicate operator state.
 
