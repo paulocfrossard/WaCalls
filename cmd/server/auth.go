@@ -45,6 +45,7 @@ type authInfo struct {
 	username  string
 	role      string
 	sessionID string // empty for API-key authentication
+	keyID     string // empty for session authentication
 	method    string // "session", "api_key" or "disabled"
 	// keyPrefix is the stored prefix of the authenticating API key. It is the
 	// only key material safe to place in audit records and it is empty for
@@ -114,6 +115,11 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if s.auth == nil {
+			if s.log != nil {
+				s.log.Warn("auth store is nil; authentication disabled implicitly")
+			} else {
+				slog.Default().Warn("auth store is nil; authentication disabled implicitly")
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -222,6 +228,13 @@ func isPublicAuthPath(r *http.Request) bool {
 func (s *server) requireRole(role string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.auth == nil || s.authDisabled {
+			if s.auth == nil && !s.authDisabled {
+				if s.log != nil {
+					s.log.Warn("auth store is nil; role check bypassed")
+				} else {
+					slog.Default().Warn("auth store is nil; role check bypassed")
+				}
+			}
 			next(w, r)
 			return
 		}
@@ -334,7 +347,7 @@ func (s *server) apiKeyAuthenticate(ctx context.Context, rawKey string) (authInf
 	if !lastUsed.Valid || lastUsed.Int64 == 0 || now-lastUsed.Int64 > apiKeyLastUsedIntervalMs {
 		_ = s.auth.touchApiKeyLastUsed(ctx, id, now)
 	}
-	return authInfo{userID: userID, username: username, role: role, method: "api_key", keyPrefix: keyPrefix}, true, nil
+	return authInfo{userID: userID, username: username, role: role, keyID: id, method: "api_key", keyPrefix: keyPrefix}, true, nil
 }
 
 func sha256Hex(v string) string {
@@ -356,6 +369,8 @@ func newSessionToken() (string, error) {
 type sseTicket struct {
 	userID    string
 	role      string
+	sessionID string
+	keyID     string
 	keyPrefix string
 	expiresAt time.Time
 }
@@ -403,6 +418,8 @@ func (s *server) issueSSETicket(info authInfo) (string, int64, error) {
 	s.sseTickets[sha256Hex(raw)] = &sseTicket{
 		userID:    info.userID,
 		role:      info.role,
+		sessionID: info.sessionID,
+		keyID:     info.keyID,
 		keyPrefix: info.keyPrefix,
 		expiresAt: expiresAt,
 	}
@@ -430,10 +447,17 @@ func (s *server) consumeSSETicket(raw string) (authInfo, bool) {
 		return authInfo{}, false
 	}
 	method := "session"
-	if t.keyPrefix != "" {
+	if t.keyID != "" || t.keyPrefix != "" {
 		method = "api_key"
 	}
-	return authInfo{userID: t.userID, role: t.role, keyPrefix: t.keyPrefix, method: method}, true
+	return authInfo{
+		userID:    t.userID,
+		role:      t.role,
+		sessionID: t.sessionID,
+		keyID:     t.keyID,
+		keyPrefix: t.keyPrefix,
+		method:    method,
+	}, true
 }
 
 // pruneSSETicketsLocked drops expired tickets at most once per second.
