@@ -399,6 +399,8 @@ func (s *server) revokeSessionFromRequest(r *http.Request) string {
 	}
 	if err := s.auth.revokeSession(r.Context(), sessionID); err != nil {
 		s.log.Error("logout: revoke failed", "err", err)
+	} else if s.broker != nil {
+		s.broker.Revoke(ssePrincipal{sessionID: sessionID})
 	}
 	return userID
 }
@@ -582,6 +584,9 @@ func (s *server) handleApiKeyDelete(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("api key: revoke failed", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
+	}
+	if s.broker != nil {
+		s.broker.Revoke(ssePrincipal{keyID: id})
 	}
 	userID, _, _ := userFromContext(r.Context())
 	actor := actorFromContext(r.Context())
