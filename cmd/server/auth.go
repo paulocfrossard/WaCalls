@@ -426,9 +426,16 @@ func (s *server) issueSSETicket(info authInfo) (string, int64, error) {
 	return raw, expiresAt.UnixMilli(), nil
 }
 
-// consumeSSETicket validates and burns a ticket. A ticket is deleted on the
-// first consume attempt, even when it is already expired, so it can never be
-// replayed.
+// sseTicketRevalidateTimeout bounds the principal revalidation performed when a
+// ticket is consumed. It is a one-shot connect-path check, so it gets a little
+// more headroom than the SSE keepalive deadline.
+const sseTicketRevalidateTimeout = time.Second
+
+// consumeSSETicket validates, burns and revalidates a ticket. An expired ticket
+// is deleted on sight. A ticket whose principal is definitively dead is
+// rejected so the stream is never opened for it; the ticket is deleted only on
+// a successful consume so single-use semantics are preserved (a concurrent
+// replay of the same raw value loses the final pointer check and is rejected).
 func (s *server) consumeSSETicket(raw string) (authInfo, bool) {
 	if raw == "" {
 		return authInfo{}, false
@@ -436,28 +443,73 @@ func (s *server) consumeSSETicket(raw string) (authInfo, bool) {
 	now := time.Now()
 	hash := sha256Hex(raw)
 	s.sseTicketMu.Lock()
-	defer s.sseTicketMu.Unlock()
 	s.pruneSSETicketsLocked(now)
 	t := s.sseTickets[hash]
 	if t == nil {
+		s.sseTicketMu.Unlock()
 		return authInfo{}, false
 	}
-	delete(s.sseTickets, hash)
 	if !now.Before(t.expiresAt) {
+		delete(s.sseTickets, hash)
+		s.sseTicketMu.Unlock()
 		return authInfo{}, false
 	}
 	method := "session"
 	if t.keyID != "" || t.keyPrefix != "" {
 		method = "api_key"
 	}
-	return authInfo{
+	info := authInfo{
 		userID:    t.userID,
 		role:      t.role,
 		sessionID: t.sessionID,
 		keyID:     t.keyID,
 		keyPrefix: t.keyPrefix,
 		method:    method,
-	}, true
+	}
+	s.sseTicketMu.Unlock()
+
+	// The ticket was minted from a principal that may have been revoked since.
+	// Revalidate read-only before opening a long-lived stream. The store lock is
+	// already released: this query must never block ticket issuance.
+	if s.auth != nil && (t.sessionID != "" || t.keyID != "") {
+		switch revalidatePrincipalVerdictTimeout(s.auth, t.sessionID, t.keyID, sseTicketRevalidateTimeout) {
+		case authInvalid:
+			log := s.log
+			if log == nil {
+				log = slog.Default()
+			}
+			log.Debug("sse ticket consumed for an invalid principal",
+				"sessionID", t.sessionID, "keyID", t.keyID)
+			// Burn the ticket: its principal is definitively dead, so it must
+			// not remain replayable for the rest of its TTL.
+			s.sseTicketMu.Lock()
+			if s.sseTickets[hash] == t {
+				delete(s.sseTickets, hash)
+			}
+			s.sseTicketMu.Unlock()
+			return authInfo{}, false
+		case authTransient:
+			// A transient lookup failure must not block a legitimate connect.
+			log := s.log
+			if log == nil {
+				log = slog.Default()
+			}
+			log.Debug("sse ticket principal revalidation inconclusive; allowing connect",
+				"sessionID", t.sessionID, "keyID", t.keyID)
+		}
+	}
+
+	// Claim the ticket: only the request that still sees this exact entry wins,
+	// so two concurrent consumers cannot both succeed.
+	s.sseTicketMu.Lock()
+	cur := s.sseTickets[hash]
+	if cur != t {
+		s.sseTicketMu.Unlock()
+		return authInfo{}, false
+	}
+	delete(s.sseTickets, hash)
+	s.sseTicketMu.Unlock()
+	return info, true
 }
 
 // pruneSSETicketsLocked drops expired tickets at most once per second.
