@@ -30,10 +30,11 @@ type CallRecord struct {
 	EndReason string     `json:"endReason,omitempty"`
 
 	// ownerKey is the principal-scoped conflict bucket: "user:<userID>" for an
-	// authenticated principal, else "client:<clientID>". It is never
-	// serialized: clients only ever see Owner, which the SPA compares
-	// against its own client id. Owner alone cannot be the conflict bucket
-	// because a client-supplied id is spoofable across users.
+	// authenticated principal, else "client:<clientID>" for an anonymous
+	// caller, falling back to "client:<clientIP>" when no client id is
+	// supplied. It is never serialized: clients only ever see Owner, which
+	// the SPA compares against its own client id. Owner alone cannot be the
+	// conflict bucket because a client-supplied id is spoofable across users.
 	ownerKey string
 }
 
@@ -462,6 +463,17 @@ func (b *Broker) ownerActiveCall(owner string) string {
 		}
 	}
 	return ""
+}
+
+// callOwnerKey reports the conflict bucket currently recorded for a call.
+func (b *Broker) callOwnerKey(id string) (string, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	c, ok := b.calls[id]
+	if !ok || c == nil {
+		return "", false
+	}
+	return c.ownerKey, true
 }
 
 func (b *Broker) endCall(id, reason string) {
