@@ -103,19 +103,18 @@ The choices behind the surface above. **(implemented)** is shipped;
    accepted directly. The client SDK uses the native `EventSource` —
    `@microsoft/fetch-event-source` is not a dependency.
 
-4. **SSE revalidation and revocation (planned).** Today the stream authenticates
-   only at connect. Subscribers will carry `sessionID` / `apiKeyID` / `userID`;
-   logout or revocation will close matching connections through a revocation channel,
-   with a read-only re-check on the existing 20 s keepalive.
+4. **SSE revalidation and revocation (implemented).** Subscribers carry
+   `sessionID` / `keyID` / `userID`; a revocation channel closes matching streams
+   immediately; the 20 s keepalive revalidates read-only, fail-closed.
 
-5. **RBAC (current plus target).** Roles are `admin` and `operator`. Webhooks move to
+5. **RBAC (current).** Roles are `admin` and `operator`. Webhooks move to
    `admin` because outbound URLs are an SSRF/egress surface.
 
    | Surface | Current | Target |
    |---|---|---|
    | API keys (`/api/auth/keys*`), debug logs | `admin` | `admin` |
    | Sessions, calls, history, events | `operator` | `operator` |
-   | Webhooks (`/api/webhooks*`) | any authenticated | `admin` (planned) |
+   | Webhooks (`/api/webhooks*`) | any authenticated | `admin` |
 
    Session management stays `operator` because it is the product's main flow. Per-user
    ownership on the `sessions` table is deferred; the system is single-tenant.
@@ -179,7 +178,7 @@ Imports use the `@/` alias → `client/src` (configured in `vite.config.ts`).
 - Per-session call limit enforced at the HTTP layer (`-max-calls-per-session`, default 8).
 - Single-operator conflict: `X-Client-Id` (header or `?clientId=`) is **advisory**, used
   only to refuse a second concurrent operator on the same session (409) — not a credential.
-- The SSE broker fans out per client id; clients reconnect with the same id to reduce
+- The SSE broker fans out per principal; clients reconnect with the same id to reduce
   duplicate operator state.
 
 ## Where to go next
