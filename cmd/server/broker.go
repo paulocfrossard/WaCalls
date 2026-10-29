@@ -93,13 +93,27 @@ type ssePrincipal struct {
 	sessionID string
 	keyID     string
 	userID    string
+
+	// role and authDisabled scope call-list/history visibility only (see
+	// canSeeCall). They deliberately do NOT participate in matches(): a
+	// Revoke caller that only knows a sessionID or keyID must still select
+	// every stream of that principal regardless of how it authenticated.
+	role         string
+	authDisabled bool
 }
 
 type subscriber struct {
-	clientID    string
-	sessionID   string
-	keyID       string
-	userID      string
+	clientID  string
+	sessionID string
+	keyID     string
+	userID    string
+
+	// principal carries the full authenticated identity (including role and
+	// authDisabled) for per-subscriber call-list visibility filtering.
+	// sessionID/keyID/userID above stay in sync with it: matches() must keep
+	// reading only those three.
+	principal ssePrincipal
+
 	ch          chan []byte
 	done        chan struct{}
 	closeOnce   sync.Once
@@ -149,6 +163,11 @@ func (s *subscriber) close() {
 
 // matches reports whether this subscriber is selected by the revocation
 // predicate p. Empty p fields are wildcards; p is never entirely empty.
+//
+// IMPORTANT: matches compares ONLY sessionID/keyID/userID. The role and
+// authDisabled fields on ssePrincipal are visibility-scoping data, never
+// revocation criteria — including them would break partial-field Revoke
+// calls (e.g. Revoke(ssePrincipal{sessionID: ...})). Keep it that way.
 func (s *subscriber) matches(p ssePrincipal) bool {
 	if p.sessionID != "" && s.sessionID != p.sessionID {
 		return false
@@ -229,6 +248,7 @@ func (b *Broker) Subscribe(clientID string, p ssePrincipal) *subscriber {
 		sessionID: p.sessionID,
 		keyID:     p.keyID,
 		userID:    p.userID,
+		principal: p,
 		ch:        make(chan []byte, 128),
 		done:      make(chan struct{}),
 	}
@@ -514,14 +534,52 @@ func (b *Broker) broadcastCallList() {
 	for _, c := range b.calls {
 		list = append(list, *c)
 	}
+	subs := make([]*subscriber, 0, len(b.subs))
+	for s := range b.subs {
+		subs = append(subs, s)
+	}
 	b.mu.RUnlock()
-	// RESIDUAL (owner exposure): call-list, call-status and the session events
+	// Webhooks get exactly ONE dispatch with the FULL list, same as before
+	// per-subscriber filtering landed: Dispatcher delivery is server-side, not
+	// bound to a browser principal, so visibility scoping does not apply to
+	// it (and dispatching per subscriber would multiply deliveries).
+	full, err := json.Marshal(map[string]any{"type": "call-list", "calls": list})
+	if err != nil {
+		return
+	}
+	if b.Dispatcher != nil {
+		b.Dispatcher.Dispatch("call-list", map[string]any{"type": "call-list", "calls": list})
+	}
+	// RESIDUAL (owner exposure): call-status and the session events still
 	// carry the raw Owner (UI client id) to every authenticated subscriber,
 	// not just the owning principal. That exposes an opaque identifier used
 	// for own-call detection, not a credential, so it cannot be replayed to
-	// claim a call (claims are authorized by ownerKey). Scoping these
-	// broadcasts per principal is deferred to a later change.
-	b.broadcast(map[string]any{"type": "call-list", "calls": list})
+	// claim a call (claims are authorized by ownerKey). Scoping those
+	// broadcasts per principal is deferred to a later change. call-list is
+	// now filtered per subscriber (canSeeCall).
+	//
+	// Sends happen outside b.mu (subs was snapshotted above) and go through
+	// trySend, preserving the sendMu/chClosed convention. Admin and
+	// auth-disabled subscribers reuse the shared marshaled bytes; everyone
+	// else gets one re-marshal of a filtered slice — worst case O(subs×calls).
+	for _, s := range subs {
+		data := full
+		if !s.principal.authDisabled && s.principal.role != "admin" {
+			filtered := make([]CallRecord, 0, len(list))
+			for i := range list {
+				if canSeeCall(s.principal.role, s.principal.userID, s.principal.authDisabled, list[i].ownerKey) {
+					filtered = append(filtered, list[i])
+				}
+			}
+			data, err = json.Marshal(map[string]any{"type": "call-list", "calls": filtered})
+			if err != nil {
+				continue
+			}
+		}
+		if !s.trySend(data) {
+			slog.Default().Warn("dropped broadcast frame", "subscriber", s.clientID)
+		}
+	}
 }
 
 func (b *Broker) emitIncoming(sessionID, id, peer string) {
@@ -534,14 +592,25 @@ func (b *Broker) emitIncomingClaimed(sessionID, id, owner string) {
 	b.broadcast(map[string]any{"type": "incoming-claimed", "sessionId": sessionID, "id": id, "owner": owner})
 }
 
-func (b *Broker) historyRows(sessionID string, limit int) []CallRecord {
+// historyRows returns up to limit ended-call rows (newest first), optionally
+// scoped to sessionID. visible, when non-nil, is applied during the scan
+// BEFORE the limit: a row failing the predicate consumes no slot, so callers
+// get up to limit *visible* rows. visible==nil disables the filter entirely.
+func (b *Broker) historyRows(sessionID string, limit int, visible func(*CallRecord) bool) []CallRecord {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	rows := make([]CallRecord, 0, limit)
 	for i := len(b.history) - 1; i >= 0 && len(rows) < limit; i-- {
-		if sessionID == "" || b.history[i].SessionID == sessionID {
-			rows = append(rows, b.history[i])
+		if sessionID != "" && b.history[i].SessionID != sessionID {
+			continue
 		}
+		if visible != nil {
+			rec := b.history[i]
+			if !visible(&rec) {
+				continue
+			}
+		}
+		rows = append(rows, b.history[i])
 	}
 	return rows
 }
@@ -628,11 +697,15 @@ func (b *Broker) serveSSEWithPrincipal(w http.ResponseWriter, r *http.Request, c
 		}
 	}
 	// Send the current call list only to this new subscriber instead of
-	// broadcasting to all subscribers (avoids O(subs) per connect).
+	// broadcasting to all subscribers (avoids O(subs) per connect). Scoped to
+	// the connecting principal's visibility (canSeeCall), under the same
+	// RLock as the copy.
 	b.mu.RLock()
 	list := make([]CallRecord, 0, len(b.calls))
 	for _, c := range b.calls {
-		list = append(list, *c)
+		if canSeeCall(sub.principal.role, sub.principal.userID, sub.principal.authDisabled, c.ownerKey) {
+			list = append(list, *c)
+		}
 	}
 	b.mu.RUnlock()
 	writeSSE(w, flusher, map[string]any{"type": "call-list", "calls": list})
