@@ -20,8 +20,11 @@ the expanded contract.
 - Bodies are JSON. Success with no body returns **204**. Errors return a JSON object
   with an `"error"` string unless noted.
 - All session-scoped routes use `{sid}` = session id from `GET /api/sessions`.
-- Operator identity: header `X-Client-Id: <id>` or query `?clientId=<id>` — used only
-  for single-operator conflict (409) on call start/accept. It is **not** a credential.
+- Operator identity: header `X-Client-Id: <id>` or query `?clientId=<id>` — advisory UI
+  and stream identity only. It is **not** the conflict key: call start/accept is bucketed
+  per authenticated user (`user:<userID>`), so an account holds one active
+  outgoing/accepted call across tabs and devices (`409` otherwise); in `-auth-disabled`
+  mode the bucket is `client:<clientID>`. It is **not** a credential.
 
 ## Authentication
 
@@ -81,7 +84,7 @@ returns `403`. Requests without an `Origin` header, and requests authenticated b
 
 | Role | Can do |
 |---|---|
-| `admin` | API key management (`/api/auth/keys*`) and `GET /api/debug/logs`; everything an operator can do |
+| `admin` | API key management (`/api/auth/keys*`), webhook management (`/api/webhooks*`), and `GET /api/debug/logs`; everything an operator can do |
 | `operator` | Everything else |
 
 ### Status semantics
@@ -136,8 +139,9 @@ connection required. Managed via `cmd/server/webhookstore.go` + `webhook_worker.
 | `GET` | `/api/webhooks` | — | `200` `{"webhooks": [{id, url, events, createdAt}]}` | — | **`secret` is never returned** (write-only) |
 | `DELETE` | `/api/webhooks/{id}` | — | `204` | `404` unknown id, `500` DB error | removes the webhook |
 
-These routes require the same credential as the rest of `/api` (see
-[Authentication](#authentication)); `-allowed-origins` and the CSRF rule apply
+These routes are **`admin` only** (`requireRole("admin")`) on top of the same
+credential as the rest of `/api` (see [Authentication](#authentication));
+`-allowed-origins` and the CSRF rule apply
 too. The authenticity of the outbound payload itself is guaranteed by the HMAC
 signature (below), not by the management API.
 
