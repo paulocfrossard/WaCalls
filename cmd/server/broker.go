@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	log "log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -29,6 +28,26 @@ type CallRecord struct {
 	Status    CallStatus `json:"status"`
 	EndedAt   *int64     `json:"endedAt,omitempty"`
 	EndReason string     `json:"endReason,omitempty"`
+
+	// ownerKey is the principal-scoped conflict bucket: "user:<userID>" for an
+	// authenticated principal, else "client:<clientID>". It is never
+	// serialized: clients only ever see Owner, which the SPA compares
+	// against its own client id. Owner alone cannot be the conflict bucket
+	// because a client-supplied id is spoofable across users.
+	ownerKey string
+}
+
+// conflictKey returns the bucket used to detect that an operator is already on
+// a call: the principal-scoped ownerKey when known, else the UI-facing owner
+// (records created without an authenticated principal).
+func (c *CallRecord) conflictKey() string {
+	if c.ownerKey != "" {
+		return c.ownerKey
+	}
+	if c.Owner != nil {
+		return *c.Owner
+	}
+	return ""
 }
 
 type AuthSnapshot struct {
@@ -44,6 +63,27 @@ type SessionInfo struct {
 	State  string `json:"state"`
 	Paired bool   `json:"paired"`
 }
+
+// authVerdict is the tri-state result of a keepalive revalidation. It lets a
+// transient lookup failure (timeout, busy database, scan error) keep the
+// stream open for up to maxTransientKeepalives (3) consecutive ticks instead
+// of tearing down every stream during a brief outage, while a definitive
+// invalid verdict still fails closed.
+type authVerdict int
+
+const (
+	authValid authVerdict = iota
+	authInvalid
+	authTransient
+)
+
+// maxTransientKeepalives bounds how many consecutive authTransient verdicts a
+// single stream may absorb. At the 20s keepalive interval that is ~60s of
+// tolerated database stall before the stream is closed, so a wedged auth store
+// cannot keep a possibly-dead principal connected indefinitely.
+const maxTransientKeepalives = 3
+
+type authChecker func(sessionID, keyID string) authVerdict
 
 // ssePrincipal identifies the authenticated principal behind an SSE stream.
 // Empty fields are unset; every stream opened by the SSE handler carries at
@@ -63,12 +103,40 @@ type subscriber struct {
 	done        chan struct{}
 	closeOnce   sync.Once
 	chCloseOnce sync.Once
+
+	// sendMu serializes sends on ch against closeCh. broadcast snapshots the
+	// subscriber set under b.mu and releases it before sending, so unsubscribe
+	// may close ch in that window; chClosed (guarded by sendMu) makes such a
+	// late send a no-op instead of a panic.
+	sendMu   sync.RWMutex
+	chClosed bool
 }
 
 // closeCh closes the data channel exactly once. Safe to call concurrently
 // and from multiple sites (unsubscribe and revokeMatching).
 func (s *subscriber) closeCh() {
-	s.chCloseOnce.Do(func() { close(s.ch) })
+	s.chCloseOnce.Do(func() {
+		s.sendMu.Lock()
+		s.chClosed = true
+		close(s.ch)
+		s.sendMu.Unlock()
+	})
+}
+
+// trySend performs a non-blocking send of data. It reports false when the
+// subscriber's buffer is full or the channel was already closed.
+func (s *subscriber) trySend(data []byte) bool {
+	s.sendMu.RLock()
+	defer s.sendMu.RUnlock()
+	if s.chClosed {
+		return false
+	}
+	select {
+	case s.ch <- data:
+		return true
+	default:
+		return false
+	}
 }
 
 // close signals the serving goroutine that this subscriber was revoked. It is
@@ -99,16 +167,23 @@ type Broker struct {
 	calls   map[string]*CallRecord
 	history []CallRecord
 
+	// pending holds in-flight owner reservations (ownerKey→callID, with "" for
+	// a call that has not been created yet). It closes the TOCTOU window
+	// between an ownership check and the claim: ReserveOwner/ReleaseOwner
+	// manipulate it under mu, and setOwner clears the bucket on commit.
+	pending map[string]string
+
 	SnapshotFn func() []any
 
 	// keepaliveInterval bounds how long a stream may go without revalidating
 	// its principal. Zero falls back to 20s.
 	keepaliveInterval time.Duration
 
-	// authCheck revalidates a stream's principal read-only. It must be
-	// fail-closed: any lookup error reports false and the stream is closed on
-	// the next keepalive. Nil disables keepalive revalidation.
-	authCheck func(sessionID, keyID string) bool
+	// authCheck revalidates a stream's principal read-only. A verdict of
+	// authInvalid closes the stream on the next keepalive; authTransient keeps
+	// it open until maxTransientKeepalives consecutive transient verdicts are
+	// reached. Nil disables revalidation.
+	authCheck authChecker
 
 	// revokeCh carries revocation predicates from Revoke to the single
 	// consumer started by StartRevocations. It is bounded so a slow/absent
@@ -136,10 +211,11 @@ func NewBroker() *Broker {
 	return &Broker{
 		subs:              map[*subscriber]struct{}{},
 		calls:             map[string]*CallRecord{},
+		pending:           map[string]string{},
 		snapshotDirty:     true,
 		snapshotGen:       0,
 		keepaliveInterval: 20 * time.Second,
-		revokeCh:          make(chan ssePrincipal, 64),
+		revokeCh:          make(chan ssePrincipal, 1024),
 	}
 }
 
@@ -159,11 +235,6 @@ func (b *Broker) Subscribe(clientID string, p ssePrincipal) *subscriber {
 	b.subs[s] = struct{}{}
 	b.mu.Unlock()
 	return s
-}
-
-// subscribe is the internal alias kept for callers without a principal.
-func (b *Broker) subscribe(clientID string) *subscriber {
-	return b.Subscribe(clientID, ssePrincipal{})
 }
 
 // unsubscribe removes s and closes its data channel. It is idempotent: if s is
@@ -210,7 +281,7 @@ func (b *Broker) StartRevocations(ctx context.Context) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Error("revocation worker panic", "panic", r)
+					slog.Error("revocation worker panic", "panic", r)
 				}
 			}()
 			for {
@@ -254,12 +325,16 @@ func (b *Broker) broadcast(ev any) {
 			}
 		}
 	}
+	// Snapshot the subscriber set under RLock and send outside it, so a slow
+	// or contended receiver never blocks Subscribe/unsubscribe/Revoke.
 	b.mu.RLock()
-	defer b.mu.RUnlock()
+	subs := make([]*subscriber, 0, len(b.subs))
 	for s := range b.subs {
-		select {
-		case s.ch <- data:
-		default:
+		subs = append(subs, s)
+	}
+	b.mu.RUnlock()
+	for _, s := range subs {
+		if !s.trySend(data) {
 			slog.Default().Warn("dropped broadcast frame", "subscriber", s.clientID)
 		}
 	}
@@ -286,6 +361,11 @@ func (b *Broker) emitSessionQR(sessionID, qr string) {
 func (b *Broker) upsertCall(r CallRecord) {
 	b.mu.Lock()
 	cp := r
+	// A state-change rebuild (session.wireCall) copies only the UI-facing
+	// Owner, so carry the principal-scoped bucket over instead of dropping it.
+	if prev, ok := b.calls[r.CallID]; ok && cp.ownerKey == "" && cp.Owner != nil {
+		cp.ownerKey = prev.ownerKey
+	}
 	b.calls[r.CallID] = &cp
 	b.mu.Unlock()
 	b.broadcastCallList()
@@ -306,20 +386,70 @@ func (b *Broker) getCall(id string) (*CallRecord, bool) {
 	return &cp, true
 }
 
-func (b *Broker) setOwner(id, owner string) bool {
+// ReserveOwner atomically reserves the conflict bucket ownerKey for callID.
+// It fails when the bucket is already held by an in-flight reservation for a
+// different call, or by an active (non-ended) call of a different callID.
+// callID may be empty for a call that does not exist yet; an empty-callID
+// reservation is exclusive so two concurrent starts for one operator cannot
+// both pass. On success the reservation is recorded in pending until setOwner
+// commits the claim or ReleaseOwner cancels it.
+func (b *Broker) ReserveOwner(ownerKey, callID string) bool {
+	if ownerKey == "" {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if held, ok := b.pending[ownerKey]; ok && (callID == "" || held != callID) {
+		return false
+	}
+	for id, c := range b.calls {
+		if id != callID && c.Status != StatusEnded && c.conflictKey() == ownerKey {
+			return false
+		}
+	}
+	b.pending[ownerKey] = callID
+	return true
+}
+
+// ReleaseOwner cancels an in-flight reservation for ownerKey, but only when it
+// belongs to callID (empty callID matches an empty reservation). It is a no-op
+// after setOwner has already cleared the bucket.
+func (b *Broker) ReleaseOwner(ownerKey, callID string) {
+	if ownerKey == "" {
+		return
+	}
+	b.mu.Lock()
+	if held, ok := b.pending[ownerKey]; ok && held == callID {
+		delete(b.pending, ownerKey)
+	}
+	b.mu.Unlock()
+}
+
+// setOwner claims a call for owner (the UI-facing client id) and records the
+// principal-scoped bucket used by ownerActiveCall. It refuses to overwrite a
+// call already claimed in a different bucket; the raw owner is updated only
+// when the bucket matches (or was empty). A successful claim also clears the
+// pending reservation for that bucket.
+func (b *Broker) setOwner(id, owner, ownerKey string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	c, ok := b.calls[id]
 	if !ok {
 		return false
 	}
-	if c.Owner != nil && *c.Owner != owner {
+	if c.ownerKey != "" && c.ownerKey != ownerKey {
 		return false
 	}
 	c.Owner = &owner
+	c.ownerKey = ownerKey
+	if held, ok := b.pending[ownerKey]; ok && (held == "" || held == id) {
+		delete(b.pending, ownerKey)
+	}
 	return true
 }
 
+// ownerActiveCall reports the live call claimed by the given conflict bucket
+// (see ownerKey on the server), or "" when the operator is idle.
 func (b *Broker) ownerActiveCall(owner string) string {
 	if owner == "" {
 		return ""
@@ -327,7 +457,7 @@ func (b *Broker) ownerActiveCall(owner string) string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	for id, c := range b.calls {
-		if c.Owner != nil && *c.Owner == owner && c.Status != StatusEnded {
+		if c.Owner != nil && c.Status != StatusEnded && c.conflictKey() == owner {
 			return id
 		}
 	}
@@ -373,6 +503,12 @@ func (b *Broker) broadcastCallList() {
 		list = append(list, *c)
 	}
 	b.mu.RUnlock()
+	// RESIDUAL (owner exposure): call-list, call-status and the session events
+	// carry the raw Owner (UI client id) to every authenticated subscriber,
+	// not just the owning principal. That exposes an opaque identifier used
+	// for own-call detection, not a credential, so it cannot be replayed to
+	// claim a call (claims are authorized by ownerKey). Scoping these
+	// broadcasts per principal is deferred to a later change.
 	b.broadcast(map[string]any{"type": "call-list", "calls": list})
 }
 
@@ -455,24 +591,12 @@ func (b *Broker) invalidateSnapshot() {
 	b.snapshotMu.Unlock()
 }
 
-// serveSSE is the compatibility entrypoint. Callers that already have a
-// principal pass it as the fourth argument; callers still on the old
-// three-argument form open a stream with an empty principal, so that stream is
-// not revocable. Both forms are supported so unmigrated call sites keep
-// compiling while T2/T3 adopt the principal-aware path.
-func (b *Broker) serveSSE(w http.ResponseWriter, r *http.Request, clientID string, p ...ssePrincipal) {
-	var principal ssePrincipal
-	if len(p) > 0 {
-		principal = p[0]
-	}
-	b.serveSSEWithPrincipal(w, r, clientID, principal)
-}
-
 // serveSSEWithPrincipal streams events for the authenticated principal p.
 //
 // The stream ends when the request is canceled, when the subscriber is revoked
-// (sub.done), or when a keepalive revalidation fails. Revalidation is
-// read-only and fail-closed: a lookup error closes the stream.
+// (sub.done), or when a keepalive revalidation reports the principal invalid.
+// Revalidation is read-only: a transient lookup failure is tolerated for at
+// most maxTransientKeepalives consecutive ticks, then the stream is closed.
 func (b *Broker) serveSSEWithPrincipal(w http.ResponseWriter, r *http.Request, clientID string, p ssePrincipal) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -508,6 +632,10 @@ func (b *Broker) serveSSEWithPrincipal(w http.ResponseWriter, r *http.Request, c
 	keepalive := time.NewTicker(interval)
 	defer keepalive.Stop()
 
+	// transient counts consecutive inconclusive revalidations for this
+	// stream. Any definitive verdict resets or ends it.
+	transient := 0
+
 	for {
 		select {
 		case <-r.Context().Done():
@@ -515,16 +643,35 @@ func (b *Broker) serveSSEWithPrincipal(w http.ResponseWriter, r *http.Request, c
 		case <-sub.done:
 			// Revoked: the principal lost its session or key.
 			return
-		case data := <-sub.ch:
+		case data, ok := <-sub.ch:
+			if !ok {
+				return
+			}
 			if _, err := w.Write(append(append([]byte("data: "), data...), '\n', '\n')); err != nil {
 				return
 			}
 			flusher.Flush()
 		case <-keepalive.C:
 			if b.authCheck != nil && (p.sessionID != "" || p.keyID != "") {
-				if !b.authCheck(p.sessionID, p.keyID) {
-					slog.Default().Debug("keepalive revalidation failed", "sessionID", p.sessionID, "keyID", p.keyID)
+				switch b.authCheck(p.sessionID, p.keyID) {
+				case authValid:
+					transient = 0
+				case authInvalid:
+					slog.Default().Debug("keepalive revalidation failed: principal invalid",
+						"sessionID", p.sessionID, "keyID", p.keyID)
 					return
+				case authTransient:
+					transient++
+					if transient >= maxTransientKeepalives {
+						slog.Default().Warn("keepalive revalidation kept failing; closing stream",
+							"sessionID", p.sessionID, "keyID", p.keyID, "consecutive", transient)
+						return
+					}
+					// Inconclusive lookup: only the DB verdict is deferred.
+					// Still emit this tick's ping so the client sees liveness,
+					// then retry the revalidation on the next tick.
+					slog.Default().Debug("keepalive revalidation inconclusive; deferring verdict",
+						"sessionID", p.sessionID, "keyID", p.keyID, "consecutive", transient)
 				}
 			}
 			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
