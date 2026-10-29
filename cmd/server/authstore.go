@@ -309,27 +309,6 @@ func (s *authStore) getSessionByHash(ctx context.Context, tokenHash string) (ses
 	return sessionID, userID, role, expiresAt, revokedInt != 0, nil
 }
 
-// revalidatePrincipal is the read-only check used by the SSE keepalive. It
-// reports whether the stream's session or API key is still live. Any lookup
-// error is fail-closed (false). It never writes and never audits.
-func (s *authStore) revalidatePrincipal(ctx context.Context, sessionID, keyID string) bool {
-	switch {
-	case sessionID != "":
-		var one int
-		err := s.db.QueryRowContext(ctx,
-			`SELECT 1 FROM sessions_auth WHERE id = ? AND revoked = 0 AND expires_at > ?`,
-			sessionID, time.Now().UnixMilli()).Scan(&one)
-		return err == nil
-	case keyID != "":
-		var one int
-		err := s.db.QueryRowContext(ctx,
-			`SELECT 1 FROM api_keys WHERE id = ? AND revoked = 0`, keyID).Scan(&one)
-		return err == nil
-	default:
-		return false
-	}
-}
-
 func (s *authStore) revokeSession(ctx context.Context, sessionID string) error {
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE sessions_auth SET revoked = 1 WHERE id = ?`, sessionID); err != nil {
