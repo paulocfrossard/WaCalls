@@ -102,6 +102,28 @@ func (r *cancelOnFlushRecorder) Flush() {
 	r.ResponseRecorder.Flush()
 }
 
+// mintAuthMwSSETicket exchanges a Bearer session token for a single-use SSE
+// ticket through the real handler.
+func mintAuthMwSSETicket(t *testing.T, h http.Handler, token string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/sse-ticket", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := doAuthMwRequest(h, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /api/auth/sse-ticket: got %d, want 201 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Ticket string `json:"ticket"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode sse ticket: %v (body=%s)", err, rec.Body.String())
+	}
+	if body.Ticket == "" {
+		t.Fatalf("sse ticket is empty (body=%s)", rec.Body.String())
+	}
+	return body.Ticket
+}
+
 func TestAuthMiddlewareRequiresCredentials(t *testing.T) {
 	s, _ := newAuthMiddlewareTestServer(t)
 	h := s.routes()
@@ -366,5 +388,53 @@ func TestAuthMiddlewareRoleEnforcement(t *testing.T) {
 	adminReq.Header.Set("Authorization", "Bearer "+adminToken)
 	if rec := doAuthMwRequest(h, adminReq); rec.Code != http.StatusOK {
 		t.Fatalf("admin GET /api/debug/logs: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAuthMiddlewareEventsRequiresPrincipal pins that GET /api/events is not a
+// public path: with an auth store configured, a request carrying no credential
+// must be rejected before the handler can open a stream.
+func TestAuthMiddlewareEventsRequiresPrincipal(t *testing.T) {
+	s, _ := newAuthMiddlewareTestServer(t)
+	h := s.routes()
+
+	rec := doAuthMwRequest(h, httptest.NewRequest(http.MethodGet, "/api/events", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("GET /api/events without credentials: got %d, want 401 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAuthMiddlewareSSETicketSingleUse covers the sequential double-consume
+// case: the first request burns the ticket and opens a stream (cancelled on the
+// first flush), while the second request with the same value must be rejected.
+func TestAuthMiddlewareSSETicketSingleUse(t *testing.T) {
+	s, st := newAuthMiddlewareTestServer(t)
+	const token = "single-use-ticket-token"
+	seedAuthMwUser(t, st, "user-ticket", "erin", "pw-erin", "operator")
+	seedAuthMwSession(t, st, "user-ticket", token, time.Hour)
+	h := s.routes()
+
+	ticket := mintAuthMwSSETicket(t, h, token)
+
+	// First consume: opens an SSE stream. Cancelling on the first flush ends
+	// the stream deterministically without a sleep.
+	req := httptest.NewRequest(http.MethodGet, "/api/events?ticket="+ticket, nil)
+	ctx, cancel := context.WithCancel(req.Context())
+	req = req.WithContext(ctx)
+	rec := &httptest.ResponseRecorder{}
+	streamRec := &cancelOnFlushRecorder{ResponseRecorder: rec, cancel: cancel}
+	h.ServeHTTP(streamRec, req)
+	cancel() // idempotent; covers a stream that returned before flushing
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first ticket consume: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("first ticket consume content type = %q, want text/event-stream", ct)
+	}
+
+	// Second consume of the same value: the ticket is already spent.
+	replay := doAuthMwRequest(h, httptest.NewRequest(http.MethodGet, "/api/events?ticket="+ticket, nil))
+	if replay.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed ticket: got %d, want 401 (body=%s)", replay.Code, replay.Body.String())
 	}
 }
