@@ -127,7 +127,8 @@ The choices behind the surface above. **(implemented)** is shipped;
    Call ownership is bucketed per authenticated user (`user:<userID>`), so one account
    holds at most one active outgoing/accepted call across all tabs and devices.
    `X-Client-Id` is advisory for UI stream identity only and never creates a separate
-   bucket; auth-disabled mode falls back to `client:<clientID>` (`cmd/server/httpapi.go:216`).
+   bucket; auth-disabled mode falls back to `client:<clientID>`, using the peer IP
+   when no client id is supplied (`cmd/server/httpapi.go:224`).
 
 ## `internal/` modules
 
