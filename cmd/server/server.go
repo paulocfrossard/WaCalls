@@ -18,7 +18,14 @@ import (
 
 // authRevalidateTimeout bounds the read-only keepalive revalidation query so a
 // stalled database cannot pin a stream goroutine.
-const authRevalidateTimeout = 2 * time.Second
+//
+// It is deliberately far below the DSN's busy_timeout (10s): openDB keeps the
+// pool at a single connection (SetMaxOpenConns(1)), so a stalled query on that
+// connection makes every other statement — including this revalidation — queue
+// behind it. At 500ms the query is canceled and classified authTransient long
+// before busy_timeout could turn it into a multi-second stall. Raising this
+// value reintroduces head-of-line blocking for every SSE keepalive.
+const authRevalidateTimeout = 500 * time.Millisecond
 
 type server struct {
 	broker    *Broker
@@ -91,6 +98,62 @@ func openDB(dbPath string) (*sql.DB, error) {
 	return db, nil
 }
 
+// revalidatePrincipalVerdict is the read-only keepalive revalidation used by
+// the SSE broker. A missing, revoked or expired principal is definitively
+// authInvalid; any other lookup failure (timeout, busy database, scan error)
+// is authTransient so a brief outage does not tear down every live stream. A
+// nil store cannot occur in production but is treated as transient to avoid a
+// revalidation storm.
+func revalidatePrincipalVerdict(auth *authStore, sessionID, keyID string) authVerdict {
+	return revalidatePrincipalVerdictTimeout(auth, sessionID, keyID, authRevalidateTimeout)
+}
+
+// revalidatePrincipalVerdictTimeout is revalidatePrincipalVerdict with an
+// explicit deadline. The single-use SSE ticket path uses a slightly larger
+// budget than the keepalive because it runs once per connect rather than once
+// per tick.
+func revalidatePrincipalVerdictTimeout(auth *authStore, sessionID, keyID string, timeout time.Duration) authVerdict {
+	if auth == nil {
+		return authTransient
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	switch {
+	case sessionID != "":
+		var revoked int
+		var expiresAt int64
+		err := auth.db.QueryRowContext(ctx,
+			`SELECT revoked, expires_at FROM sessions_auth WHERE id = ?`, sessionID).
+			Scan(&revoked, &expiresAt)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return authInvalid
+		case err != nil:
+			return authTransient
+		case revoked != 0 || expiresAt <= time.Now().UnixMilli():
+			return authInvalid
+		default:
+			return authValid
+		}
+	case keyID != "":
+		var revoked int
+		err := auth.db.QueryRowContext(ctx,
+			`SELECT revoked FROM api_keys WHERE id = ?`, keyID).Scan(&revoked)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return authInvalid
+		case err != nil:
+			return authTransient
+		case revoked != 0:
+			return authInvalid
+		default:
+			return authValid
+		}
+	default:
+		return authInvalid
+	}
+}
+
 func newServer(ctx context.Context, opts serverOptions, log *slog.Logger) (*server, error) {
 	// bcrypt silently ignores everything past 72 bytes; reject early instead of
 	// bootstrapping an account whose effective password differs from the input.
@@ -132,15 +195,11 @@ func newServer(ctx context.Context, opts serverOptions, log *slog.Logger) (*serv
 	}
 
 	broker := NewBroker()
-	// SSE keepalive revalidation is read-only and fail-closed: any DB error
-	// closes the stream on the next tick instead of extending it.
-	broker.authCheck = func(sessionID, keyID string) bool {
-		if auth == nil {
-			return false
-		}
-		checkCtx, cancel := context.WithTimeout(context.Background(), authRevalidateTimeout)
-		defer cancel()
-		return auth.revalidatePrincipal(checkCtx, sessionID, keyID)
+	// SSE keepalive revalidation is read-only: a definitively invalid principal
+	// closes the stream, while a transient lookup failure keeps it open for up
+	// to maxTransientKeepalives (3) consecutive ticks (see authVerdict).
+	broker.authCheck = func(sessionID, keyID string) authVerdict {
+		return revalidatePrincipalVerdict(auth, sessionID, keyID)
 	}
 	broker.StartRevocations(ctx)
 	worker := newWebhookWorker(whStore, log, opts.WebhookAllowHosts)
