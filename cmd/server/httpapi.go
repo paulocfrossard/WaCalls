@@ -213,6 +213,19 @@ func clientID(r *http.Request) string {
 	return r.URL.Query().Get("clientId")
 }
 
+// ownerKey returns the ownership bucket for call-claim operations. An
+// authenticated principal is identified solely by its userID, so a spoofed
+// X-Client-Id can never move the caller into another user's bucket. Callers
+// with no real principal — no auth info, or the synthetic -auth-disabled
+// principal (which shares one userID across every client) — fall back to the
+// client-supplied id, namespaced so it can never collide with a "user:" bucket.
+func (s *server) ownerKey(r *http.Request) string {
+	if info, ok := authInfoFromContext(r.Context()); ok && info.userID != "" && info.method != "disabled" {
+		return "user:" + info.userID
+	}
+	return "client:" + clientID(r)
+}
+
 func (s *server) sessionByID(w http.ResponseWriter, sid string) *Session {
 	sess, ok := s.sessions.Get(sid)
 	if !ok {
@@ -230,7 +243,11 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "broker unavailable"})
 		return
 	}
-	info, _ := authInfoFromContext(r.Context())
+	info, ok := authInfoFromContext(r.Context())
+	if !ok && s.auth != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
 	s.broker.serveSSEWithPrincipal(w, r, clientID(r), ssePrincipal{
 		sessionID: info.sessionID,
 		keyID:     info.keyID,
@@ -476,11 +493,26 @@ func (s *server) doStartCall(sess *Session, w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "phone required"})
 		return
 	}
-	owner := clientID(r)
-	if other := s.broker.ownerActiveCall(owner); other != "" {
+	// ownerKey scopes the conflict bucket to the authenticated principal;
+	// recordOwner is what the SPA compares against its own client id.
+	ownerKey := s.ownerKey(r)
+	recordOwner := clientID(r)
+	// Reserve the bucket atomically before touching the session so two
+	// concurrent start requests for the same operator cannot both pass the
+	// "already on a call" check (TOCTOU). The empty callID marks a reservation
+	// for a call that does not exist yet; setOwner clears it once the call is
+	// registered. Every path that does not commit the claim — including an
+	// unexpected return or panic — releases the reservation via defer.
+	if !s.broker.ReserveOwner(ownerKey, "") {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call"})
 		return
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			s.broker.ReleaseOwner(ownerKey, "")
+		}
+	}()
 	if max := s.sessions.maxCalls; max > 0 && sess.reg.count() >= max {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "max concurrent calls"})
 		return
@@ -493,9 +525,16 @@ func (s *server) doStartCall(sess *Session, w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.broker.upsertCall(CallRecord{
-		SessionID: sess.id, CallID: callID, Owner: &owner, Direction: "outbound", Peer: peer.String(),
+		SessionID: sess.id, CallID: callID, Owner: &recordOwner, ownerKey: ownerKey,
+		Direction: "outbound", Peer: peer.String(),
 		StartedAt: time.Now().UnixMilli(), Status: StatusRinging,
 	})
+	// Commits the claim and releases the pending reservation for this bucket.
+	if !s.broker.setOwner(callID, recordOwner, ownerKey) {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to claim call"})
+		return
+	}
+	committed = true
 	writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": callID}})
 }
 
@@ -552,20 +591,41 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
 		return
 	}
-	owner := clientID(r)
-	if other := s.broker.ownerActiveCall(owner); other != "" && other != id {
+	// ownerKey scopes the conflict bucket to the authenticated principal;
+	// recordOwner is what the SPA compares against its own client id.
+	ownerKey := s.ownerKey(r)
+	recordOwner := clientID(r)
+	// Reserve the bucket atomically for this specific call before the
+	// ownership checks, closing the TOCTOU window between the check and the
+	// commit. The reservation is released by the deferred cleanup on every
+	// path that does not reach a successful setOwner, including panics.
+	if !s.broker.ReserveOwner(ownerKey, id) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call"})
 		return
 	}
-	if !s.broker.setOwner(id, owner) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
+	committed := false
+	defer func() {
+		if !committed {
+			s.broker.ReleaseOwner(ownerKey, id)
+		}
+	}()
+	if other := s.broker.ownerActiveCall(ownerKey); other != "" && other != id {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call"})
 		return
 	}
-	s.broker.emitIncomingClaimed(sess.id, id, owner)
+	// Accept first, claim afterwards: committing the ownership before the
+	// call is actually accepted would leave the bucket held by a call that
+	// never got accepted when AcceptCall fails.
 	if err := ac.cm.AcceptCall(r.Context(), id); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	if !s.broker.setOwner(id, recordOwner, ownerKey) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
+		return
+	}
+	committed = true
+	s.broker.emitIncomingClaimed(sess.id, id, recordOwner)
 	writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": id}})
 }
 
