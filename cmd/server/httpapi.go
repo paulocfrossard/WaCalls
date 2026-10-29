@@ -255,9 +255,11 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.broker.serveSSEWithPrincipal(w, r, clientID(r), ssePrincipal{
-		sessionID: info.sessionID,
-		keyID:     info.keyID,
-		userID:    info.userID,
+		sessionID:    info.sessionID,
+		keyID:        info.keyID,
+		userID:       info.userID,
+		role:         info.role,
+		authDisabled: s.authDisabled || info.method == "disabled" || s.auth == nil,
 	})
 }
 
@@ -478,7 +480,11 @@ func (s *server) handleEndCall(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	if sess := s.sessionByID(w, r.PathValue("sid")); sess != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"rows": s.broker.historyRows(sess.id, 50)})
+		info, _ := authInfoFromContext(r.Context())
+		authDisabled := s.authDisabled || info.method == "disabled" || s.auth == nil
+		writeJSON(w, http.StatusOK, map[string]any{"rows": s.broker.historyRows(sess.id, 50, func(c *CallRecord) bool {
+			return canSeeCall(info.role, info.userID, authDisabled, c.ownerKey)
+		})})
 	}
 }
 
