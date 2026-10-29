@@ -45,6 +45,25 @@ cost 12 (`cmd/server/authstore.go`).
   **not verified**, not a credential — authentication is
   a separate layer (API key or session cookie).
 
+## Call listing visibility
+
+Both call read paths — the SSE `call-list` frame (initial snapshot per
+connection plus every broadcast) and `GET /api/sessions/{sid}/history` — are
+filtered **server-side** against each record's `ownerKey` bucket
+(`cmd/server/callvisibility.go`). Filtering happens before history's 50-row
+cap. The serialized `owner` field (raw client id, used by the UI for "my call")
+is unchanged in responses; `ownerKey` itself is never serialized.
+
+| Principal | Sees |
+|---|---|
+| `admin` | All calls, including `client:<id>` / `client:<ip>` orphans |
+| `operator` | Only calls with `ownerKey` = `user:<ownUserID>` — never another operator's calls, never orphans |
+| Empty/unknown role, or a call with an empty `ownerKey` | Fail closed: visible only to `admin` |
+| `-auth-disabled` (POC) | Behaves as `admin`: full list |
+
+Admin-only reads (`GET /api/debug/logs`) and internal helpers (`getCall`,
+`ownerActiveCall`) are unaffected by this filter.
+
 ## Session cookie and SSE tickets
 
 Login is **cookie-only for the browser**: `POST /api/auth/login` sets the
