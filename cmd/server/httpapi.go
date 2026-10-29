@@ -219,11 +219,17 @@ func clientID(r *http.Request) string {
 // with no real principal — no auth info, or the synthetic -auth-disabled
 // principal (which shares one userID across every client) — fall back to the
 // client-supplied id, namespaced so it can never collide with a "user:" bucket.
+// When even that id is absent every such caller would share the single bucket
+// "client:", so fall back to the peer IP to keep them separated.
 func (s *server) ownerKey(r *http.Request) string {
 	if info, ok := authInfoFromContext(r.Context()); ok && info.userID != "" && info.method != "disabled" {
 		return "user:" + info.userID
 	}
-	return "client:" + clientID(r)
+	cid := clientID(r)
+	if cid == "" {
+		cid = s.clientIP(r)
+	}
+	return "client:" + cid
 }
 
 func (s *server) sessionByID(w http.ResponseWriter, sid string) *Session {
@@ -621,6 +627,11 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !s.broker.setOwner(id, recordOwner, ownerKey) {
+		// Compensation: the call was accepted but could not be claimed; end it
+		// so no accepted, unowned call lingers in the registry.
+		_ = ac.cm.EndCall(r.Context(), core.EndCallReasonUserEnded)
+		sess.removeCall(id)
+		s.broker.endCall(id, string(core.EndCallReasonUserEnded))
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
 		return
 	}
