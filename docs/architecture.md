@@ -159,6 +159,16 @@ Same six steps as the README sequence, with state names:
 Call statuses in SSE events: `starting | ringing | connected | ended`
 (`cmd/server/broker.go`).
 
+Call listings are scoped per authenticated principal on both read paths — the
+`call-list` SSE frame (initial snapshot per connection plus every broadcast) and
+`GET /api/sessions/{sid}/history`. The server filters each record against its
+`ownerKey` bucket (`cmd/server/callvisibility.go`): `admin` sees every call,
+including `client:<id>` / `client:<ip>` orphans; `operator` sees only
+`user:<ownUserID>`; an empty/unknown role or empty `ownerKey` fails closed
+(admin only). `-auth-disabled` (POC) behaves as admin: the list is global. The
+filter runs server-side only — `owner` stays the raw client id the UI uses for
+"my call", and `ownerKey` is never serialized.
+
 ## Browser leg (`client/`)
 
 No client-side router — navigation is component state (`pages/CallsPage`,
