@@ -27,7 +27,7 @@ cost 12 (`cmd/server/authstore.go`).
 |---|---|---|
 | All `/api/*` routes | **Auth required** (`Authorization: Bearer <session token or API key>`, `X-API-Key`, or the `wacalls_session` HttpOnly cookie); login limited to 10 failed/min per `(IP, username)`, 30/min per IP, and 300/min globally; CORS `*` by default — restrict with `-allowed-origins` | With `operator` credentials: create/delete sessions (WhatsApp accounts), place/receive/end calls, read call history and peer numbers. With `admin`: also manage API keys and read diagnostics |
 | `GET /api/events` (SSE) | **Auth required**: a single-use `?ticket=` (60 s TTL) minted by `POST /api/auth/sse-ticket`, or the session cookie when no ticket is supplied (EventSource cannot set headers). A leaked URL is only briefly replayable | Real-time surveillance of session pairing, call lifecycle, peer metadata |
-| `POST/GET/DELETE /api/webhooks` | **Auth required** (operators can register); a webhook URL still lets any authenticated caller cause outbound requests | **Server-side request forgery (SSRF) egress**: the server sends signed POSTs to any http/https URL the caller supplies, including internal hosts (`http://10.x/...`), loopback services, and cloud metadata (`http://169.254.169.254/...`). Delivery is blind (no response body is echoed back), so this is a side-effect/egress vector, not an exfiltration channel — but it can trigger internal actions and, if the receiver echoes data elsewhere, aid pivoting |
+| `POST/GET/DELETE /api/webhooks` | **Auth required, `admin` role only** (`requireRole("admin")`); an admin-registered URL still makes the server issue outbound requests | **Server-side request forgery (SSRF) egress**: the server sends signed POSTs to any http/https URL the caller supplies, including internal hosts (`http://10.x/...`), loopback services, and cloud metadata (`http://169.254.169.254/...`). Delivery is blind (no response body is echoed back), so this is a side-effect/egress vector, not an exfiltration channel — but it can trigger internal actions and, if the receiver echoes data elsewhere, aid pivoting |
 | `GET /api/debug/logs` | **Auth required, `admin` role only** (`-debug-log`, default **on**) | Leak of call IDs, SSRCs, audio-level telemetry, ICE/DC states |
 | `GET /` static files | Public (assets + SPA fallback, including `/login`); only when `-static` dir exists | Low — serves the SPA bundle only |
 | `wacalls.db` (SQLite) | Filesystem | **WhatsApp session credentials (secrets)** plus auth sessions/keys (hashed). Full account takeover of linked devices |
@@ -36,9 +36,12 @@ cost 12 (`cmd/server/authstore.go`).
 
 - Clients send an advisory operator id: header `X-Client-Id` or query `?clientId=`
   (`client/src/lib/client-id.ts`, `lib/api.ts`).
-- The server uses it only to enforce **single-operator conflicts** (HTTP 409 on call
-  start/accept when another operator holds the session). It is **not verified**, not a
-  credential — authentication is a separate layer (API key or session cookie).
+- The server uses it only for advisory UI/stream identity. The **conflict bucket** for
+  call start/accept is the authenticated user (`user:<userID>`): an account holds at
+  most one active outgoing/accepted call across tabs and devices, so a second
+  start/accept returns HTTP 409. In `-auth-disabled` mode the bucket is
+  `client:<clientID>`. The id is **not verified**, not a credential — authentication is
+  a separate layer (API key or session cookie).
 
 ## Session cookie and SSE tickets
 
@@ -153,7 +156,7 @@ hostname.
 6. Keep `-srtp-auth=true` (default). Only disable for a time-boxed legacy interop test.
 7. Consider `-debug-log=false` in shared environments to shrink telemetry exposure.
 8. Protect/backup `wacalls.db` as a secret; a leak = account takeover.
-9. Set `-webhook-allow-hosts` to the exact receiver hostname(s) if webhooks are used — otherwise any authenticated caller can point webhooks at internal/metadata targets.
+9. Set `-webhook-allow-hosts` to the exact receiver hostname(s) if webhooks are used — otherwise an admin who registers a webhook can point it at internal/metadata targets.
 10. Re-check this doc against `auth.go`, `authapi.go`, `httpapi.go`, and `srtp.go` when
     touching route auth or SRTP — the plan file (`implementacao.md` §1) tracks the SRTP
     hardening history.
