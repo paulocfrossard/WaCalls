@@ -459,13 +459,29 @@ func randomHex64(t *testing.T) string {
 func TestAuthMiddlewareSSETicketUnknownRejected(t *testing.T) {
 	s, _ := newAuthMiddlewareTestServer(t)
 	h := s.routes()
+	ticket := randomHex64(t)
 
-	rec := doAuthMwRequest(h, httptest.NewRequest(http.MethodGet, "/api/events?ticket="+randomHex64(t), nil))
+	rec := doAuthMwRequest(h, httptest.NewRequest(http.MethodGet, "/api/events?ticket="+ticket, nil))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unknown ticket on /api/events: got %d, want 401 (body=%s)", rec.Code, rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), "unauthorized") {
 		t.Fatalf("unknown ticket 401 body = %q, want an unauthorized error", rec.Body.String())
+	}
+
+	// Replaying the same never-issued ticket must still be rejected: the failed
+	// consume must not have recorded it, so no request can "claim" it later.
+	replay := doAuthMwRequest(h, httptest.NewRequest(http.MethodGet, "/api/events?ticket="+ticket, nil))
+	if replay.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed unknown ticket: got %d, want 401 (body=%s)", replay.Code, replay.Body.String())
+	}
+
+	hash := sha256Hex(ticket)
+	s.sseTicketMu.Lock()
+	_, stored := s.sseTickets[hash]
+	s.sseTicketMu.Unlock()
+	if stored {
+		t.Fatalf("unknown ticket %q was recorded in sseTickets", ticket)
 	}
 }
 
