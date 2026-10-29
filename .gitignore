@@ -6,6 +6,8 @@ run-mlow.ps1
 *.out
 /dist/
 /bin/
+# stray go build artifacts
+/server
 wacalls.db
 *.db
 *.db-journal
