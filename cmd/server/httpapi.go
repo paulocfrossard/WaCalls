@@ -53,9 +53,9 @@ func (s *server) routes() http.Handler {
 	// Webhook management (outbound HTTP POST notifications). Requires auth;
 	// the payload itself is HMAC-signed so external receivers can verify
 	// authenticity — see docs/api.md.
-	mux.HandleFunc("POST /api/webhooks", s.handleWebhookCreate)
-	mux.HandleFunc("GET /api/webhooks", s.handleWebhookList)
-	mux.HandleFunc("DELETE /api/webhooks/{id}", s.handleWebhookDelete)
+	mux.HandleFunc("POST /api/webhooks", s.requireRole("admin", s.handleWebhookCreate))
+	mux.HandleFunc("GET /api/webhooks", s.requireRole("admin", s.handleWebhookList))
+	mux.HandleFunc("DELETE /api/webhooks/{id}", s.requireRole("admin", s.handleWebhookDelete))
 
 	// Debug log ring (fed by logbuf; toggle with -debug-log). Admin-only.
 	mux.HandleFunc("GET /api/debug/logs", s.requireRole("admin", s.handleDebugLogs))
@@ -222,8 +222,20 @@ func (s *server) sessionByID(w http.ResponseWriter, sid string) *Session {
 	return sess
 }
 
+// handleEvents streams broker events over SSE. The authenticated principal is
+// attached to the stream so revocation can target it; when no principal is in
+// the context (auth-less server) the stream opens with an empty principal.
 func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	s.broker.serveSSE(w, r, clientID(r))
+	if s.broker == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "broker unavailable"})
+		return
+	}
+	info, _ := authInfoFromContext(r.Context())
+	s.broker.serveSSEWithPrincipal(w, r, clientID(r), ssePrincipal{
+		sessionID: info.sessionID,
+		keyID:     info.keyID,
+		userID:    info.userID,
+	})
 }
 
 // handleWebhookCreate registers an outbound webhook endpoint.
