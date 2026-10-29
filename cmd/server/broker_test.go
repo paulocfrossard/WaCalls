@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -118,6 +119,40 @@ func TestOwnerKeySpoofDoesNotHijack(t *testing.T) {
 	}
 	if rec.Owner == nil || *rec.Owner != rawA {
 		t.Fatalf("A's raw owner changed to %v, want %q", rec.Owner, rawA)
+	}
+}
+
+// TestOwnerKeyAnonymousFallsBackToClientIP verifies that callers with no
+// authenticated principal and no client-supplied id are separated by their peer
+// IP instead of collapsing into the single "client:" bucket, and that an
+// explicit X-Client-Id still takes precedence over the peer IP.
+func TestOwnerKeyAnonymousFallsBackToClientIP(t *testing.T) {
+	s := &server{}
+
+	req1 := httptest.NewRequest(http.MethodPost, "/api/sessions/s1/calls", nil)
+	req1.RemoteAddr = "192.0.2.10:1234"
+	req2 := httptest.NewRequest(http.MethodPost, "/api/sessions/s1/calls", nil)
+	req2.RemoteAddr = "192.0.2.11:1234"
+
+	k1, k2 := s.ownerKey(req1), s.ownerKey(req2)
+	if k1 == k2 {
+		t.Fatalf("anonymous callers from different IPs must not share a bucket: both %q", k1)
+	}
+	for _, k := range []string{k1, k2} {
+		if !strings.HasPrefix(k, "client:") {
+			t.Fatalf("anonymous bucket = %q, want a client: prefix", k)
+		}
+		if k == "client:" {
+			t.Fatalf("anonymous bucket must not be the bare %q", "client:")
+		}
+	}
+
+	// An explicit client id wins over the peer IP.
+	explicit := httptest.NewRequest(http.MethodPost, "/api/sessions/s1/calls", nil)
+	explicit.RemoteAddr = "192.0.2.10:1234"
+	explicit.Header.Set("X-Client-Id", "tab-explicit")
+	if got, want := s.ownerKey(explicit), "client:tab-explicit"; got != want {
+		t.Fatalf("X-Client-Id bucket = %q, want %q", got, want)
 	}
 }
 
