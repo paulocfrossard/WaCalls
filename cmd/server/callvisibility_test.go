@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -296,6 +297,45 @@ func TestHistoryKeepsOwnerFieldIntact(t *testing.T) {
 	// not silently dropped by the filtering pass.
 	if !strings.Contains(body, `"owner":null`) {
 		t.Fatalf("history body drops the null owner key: %s", body)
+	}
+}
+
+// TestHistoryPredicateAppliedBeforeCap pins that the visibility predicate runs
+// BEFORE the 50-row cap in historyRows: a failed row consumes no cap slot, so
+// the listing returns up to 50 *visible* rows. Seeded 55 rows for one session:
+// 52 owned by operator A plus 3 orphans ("client:x", newest). A regression to
+// post-limit filtering would take the newest 50 (47 A + 3 orphans), filter the
+// orphans out, and return 47 — this asserts exactly 50 rows, all A's.
+func TestHistoryPredicateAppliedBeforeCap(t *testing.T) {
+	s := newSSETestServer(t, 0)
+	tokenA := seedVisibilityUser(t, s, "user-A", "opa", "operator")
+	seedVisibilitySession(t, s, visibilitySID)
+	const aCalls, orphanCalls = 52, 3
+	wantIDs := make([]string, 0, aCalls)
+	for i := range aCalls {
+		id := "call-a-" + strconv.Itoa(i)
+		seedEndedCall(t, s, visibilitySID, id, "user:user-A", ownerPtr("tab-a"))
+		wantIDs = append(wantIDs, id)
+	}
+	// Orphans are seeded last so they land in the newest rows — the exact
+	// window a post-cap filter would consume before dropping them.
+	for i := range orphanCalls {
+		seedEndedCall(t, s, visibilitySID, "call-orphan-"+strconv.Itoa(i), "client:x", ownerPtr("tab-x"))
+	}
+
+	rows, body := fetchHistory(t, s.routes(), tokenA, visibilitySID)
+	if len(rows) != 50 {
+		t.Fatalf("history rows = %d, want exactly the cap of 50 (predicate must run before the cap); body=%s", len(rows), body)
+	}
+	// Every returned row must be one of A's calls: an orphan in the payload
+	// means the predicate ran after the cap and dropped the wrong slots.
+	for _, r := range rows {
+		if !slices.Contains(wantIDs, r.CallID) {
+			t.Fatalf("row %q is not operator A's call (owner=%v): %s", r.CallID, r.Owner, body)
+		}
+		if r.Owner == nil || *r.Owner != "tab-a" {
+			t.Fatalf("row %q owner = %v, want %q", r.CallID, r.Owner, "tab-a")
+		}
 	}
 }
 
