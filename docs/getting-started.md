@@ -160,7 +160,7 @@ definition of done.
 | `npm run preview` cannot reach the API | Preview has no `/api` proxy by design | Serve the build from the Go server (`-static client/dist`) instead |
 | Audio missing but call connects | Browser mic permission, or device selection | Grant mic permission; pick devices in the UI (device hooks enumerate `getUserMedia` / `setSinkId`) |
 | `429` when starting a call | Per-session call limit reached | Raise `-max-calls-per-session` (default `8`) or end active calls |
-| `409` on call start/accept | Operator already busy (single-operator conflict via `X-Client-Id`) | Finish the active call, or use a distinct client id |
+| `409` on call start/accept | Account already busy (one active outgoing/accepted call per authenticated user; `X-Client-Id` does not create a separate bucket) | Finish the active call on any tab or device |
 | Login succeeds but every `/api` call returns `401` | Cookie is `Secure` while the page is served over plain HTTP | Add `-cookie-secure=false`, or serve over HTTPS |
 | `429` on login | Too many failed attempts: over 10/min for the same IP + username, 30/min from one IP, or 300/min globally | Wait a minute, then check the credentials |
 | Startup aborts with `Banco de dados vazio...` | `WACALLS_ADMIN_PASSWORD` is unset and the users table is empty | Set the variable (see `.env.example`) and start again; see [security](./security.md) |
