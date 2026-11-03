@@ -145,6 +145,8 @@ export class WaCallsClient {
   #muted = false;
   /** In-flight lock for #openMedia: only one media open at a time (first wins). */
   #mediaOpening = false;
+  /** Deferred base URL to apply once the active call ends. */
+  #pendingBaseUrl: string | null = null;
   /** Generation token: bumped by each #openMedia claim and by disconnect() —
    *  a stale in-flight open closes its freshly created conn instead of
    *  orphaning it or overwriting `#active`. */
@@ -208,6 +210,7 @@ export class WaCallsClient {
       void this.hangup(active.sessionId, active.callId).catch(() => {});
     }
     this.#teardownActive();
+    this.#applyPendingBaseUrl();
   }
 
   #openEventSource(): void {
@@ -233,8 +236,9 @@ export class WaCallsClient {
     // we additionally guard that each frame is a JSON object with a "type".
     es.onmessage = (ev) => this.#handleSseData(ev.data);
     es.onerror = () => {
+      if (this.#es !== es) { es.close(); return; }   // stale stream from a previous base
       es.close();
-      if (this.#es === es) this.#es = null;
+      this.#es = null;
       this.#scheduleReconnect();
     };
   }
@@ -426,6 +430,53 @@ export class WaCallsClient {
     if (audio) void this.#applySink(audio, outId ?? "");
   }
 
+  /** Retarget the API base URL at runtime. Mutates the stored base in place
+   *  (preserving listeners, clientId, mute state) and reopens the SSE stream
+   *  against the new base when connected. If a call is active, the swap is
+   *  deferred until the active call ends (never disconnects mid-call). */
+  setBaseUrl(baseUrl: string): void {
+    if (typeof baseUrl !== "string") {
+      throw new Error("WaCallsClient: config.baseUrl must be a string (use \"\" for same-origin)");
+    }
+    const normalized = baseUrl.replace(/\/+$/, "");
+    if (normalized === this.#cfg.baseUrl && this.#pendingBaseUrl === null) return;
+    if (normalized === this.#cfg.baseUrl) {
+      // reverting to the currently-live base while a swap is deferred: cancel it
+      this.#pendingBaseUrl = null;
+      return;
+    }
+    if (this.#active !== null || this.#mediaOpening) {
+      // Defer both the REST base and the SSE reopen until the call ends.
+      this.#pendingBaseUrl = normalized;
+      return;
+    }
+    this.#cfg.baseUrl = normalized;
+    this.#pendingBaseUrl = null;
+    this.#reopenEventSource();
+  }
+
+  /** Reopen the SSE stream against the current base URL. */
+  #reopenEventSource(): void {
+    if (this.#stopped) return;
+    this.#es?.close();
+    this.#es = null;
+    if (this.#reconnectTimer !== null) {
+      clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = null;
+    }
+    this.#reconnectMs = RECONNECT_BASE_MS;
+    this.#openEventSource();
+  }
+
+  /** Apply a deferred base URL after a call ends (called from call-ended). */
+  #applyPendingBaseUrl(): void {
+    const pending = this.#pendingBaseUrl;
+    if (pending === null) return;
+    this.#pendingBaseUrl = null;
+    this.#cfg.baseUrl = pending;
+    this.#reopenEventSource();
+  }
+
   /** callId of the locally-open call, if any. */
   get activeCallId(): string | null {
     return this.#active?.callId ?? null;
@@ -450,7 +501,7 @@ export class WaCallsClient {
     // One active call at a time — replacing a different call tears it down.
     if (this.#active) {
       if (this.#active.callId === callId) return;
-      this.#teardownActive();
+      this.#teardownActive(false);
     }
     // In-flight lock + generation token: two overlapping startCall/answerCall
     // must not both open media and overwrite `#active`. First wins (holds the
@@ -493,6 +544,7 @@ export class WaCallsClient {
       this.#active = { callId, sessionId, conn, audio };
     } finally {
       this.#mediaOpening = false;
+      if (this.#active === null) this.#applyPendingBaseUrl();
     }
   }
 
@@ -518,7 +570,7 @@ export class WaCallsClient {
     }
   }
 
-  #teardownActive(): void {
+  #teardownActive(applyBase = true): void {
     const active = this.#active;
     if (!active) return;
     this.#active = null;
@@ -536,6 +588,7 @@ export class WaCallsClient {
         active.audio.remove();
       } catch {}
     }
+    if (applyBase) this.#applyPendingBaseUrl();
   }
 
   /* ---------------------------------------------------------------------- */

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Bug, Loader2, Plus, Trash2 } from "lucide-react";
+import { Bug, Loader2, Plus, Settings, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -100,6 +100,19 @@ export const Sidebar = ({ onNavigate }: { onNavigate?: () => void }) => {
       >
         <Bug className="h-4 w-4" aria-hidden="true" />
         Debug
+      </Button>
+
+      <Button
+        variant={view === "settings" ? "secondary" : "ghost"}
+        className="w-full justify-start"
+        onClick={() => {
+          setView("settings");
+          onNavigate?.();
+        }}
+        aria-current={view === "settings" ? "page" : undefined}
+      >
+        <Settings className="h-4 w-4" aria-hidden="true" />
+        Settings
       </Button>
 
       <ConfirmDialog

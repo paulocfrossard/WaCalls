@@ -4,7 +4,7 @@ import { create } from "zustand";
  * Top-level view state. The app has no router (see `App.tsx`): navigation is
  * plain state, so the DEBUG panel is a view like any other content block.
  */
-export type AppView = "app" | "debug";
+export type AppView = "app" | "debug" | "settings";
 
 type State = {
   view: AppView;

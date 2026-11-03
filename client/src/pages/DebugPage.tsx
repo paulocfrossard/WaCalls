@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { withBase } from "@/lib/base";
 import {
   ALERT_SOURCES,
   LEVEL_RANK,
@@ -254,7 +255,7 @@ export const DebugPage = () => {
     abortRef.current = ctrl;
     const timer = window.setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
     try {
-      const res = await fetch(`/api/debug/logs?since=${seqRef.current}&limit=${PAGE_LIMIT}`, {
+      const res = await fetch(withBase(`/api/debug/logs?since=${seqRef.current}&limit=${PAGE_LIMIT}`), {
         signal: ctrl.signal,
         headers: { Accept: "application/json" },
       });

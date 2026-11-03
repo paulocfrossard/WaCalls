@@ -13,6 +13,7 @@ import { ensureCallsWired } from "@/stores/calls";
 import { useTheme } from "@/stores/theme";
 import { useUi } from "@/stores/ui";
 import { DebugPage } from "@/pages/DebugPage";
+import { SettingsPage } from "@/pages/SettingsPage";
 
 export const App = () => {
   const sessions = useSessions((s) => s.sessions);
@@ -32,6 +33,8 @@ export const App = () => {
       <AppShell>
         {view === "debug" ? (
           <DebugPage />
+        ) : view === "settings" ? (
+          <SettingsPage />
         ) : sessions.length === 0 ? (
           <EmptyState
             icon={<PlusCircle className="h-6 w-6" />}

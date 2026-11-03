@@ -1,4 +1,5 @@
 import { apiGet, apiPost, apiDelete } from "@/lib/api";
+import { withBase } from "@/lib/base";
 import { getClientId } from "@/lib/client-id";
 import type { SessionInfo } from "@/types/session";
 
@@ -11,7 +12,7 @@ export const createSession = (name: string) =>
 export const deleteSession = (id: string) => apiDelete(`/api/sessions/${id}`);
 
 const postVoid = async (path: string): Promise<void> => {
-  const r = await fetch(path, {
+  const r = await fetch(withBase(path), {
     method: "POST",
     headers: { "X-Client-Id": getClientId(), "Content-Type": "application/json" },
     body: "{}",
