@@ -20,6 +20,7 @@ func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/sessions", s.handleSessionList)
+	mux.HandleFunc("GET /api/sessions/{sid}", s.handleSessionGet)
 	mux.HandleFunc("POST /api/sessions", s.handleSessionCreate)
 	mux.HandleFunc("DELETE /api/sessions/{sid}", s.handleSessionDelete)
 	mux.HandleFunc("POST /api/sessions/{sid}/logout", s.handleSessionLogout)
@@ -216,6 +217,14 @@ func (s *server) handleDebugLogs(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": s.sessions.infos()})
+}
+
+func (s *server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
+	sess := s.sessionByID(w, r.PathValue("sid"))
+	if sess == nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, sess.info())
 }
 
 func (s *server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
