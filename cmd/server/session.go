@@ -212,7 +212,16 @@ func (s *Session) startPairing(ctx context.Context) error {
 				s.setAuth(AuthSnapshot{State: "open", Paired: true})
 			case "timeout":
 				s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
+			default:
+				s.log.Warn("unhandled qr event", "event", evt.Event, "err", evt.Error)
 			}
+		}
+		s.log.Info("qr channel closed")
+		s.mu.Lock()
+		st := s.auth.State
+		s.mu.Unlock()
+		if st == "connecting" || st == "qr" {
+			s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
 		}
 	}()
 	return nil

@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,6 +9,16 @@ import type { SessionInfo } from "@/types/session";
 
 export const SessionPairing = ({ session }: { session: SessionInfo }) => {
   const qr = useSessions((s) => s.qrs[session.id]);
+  const [timedOut, setTimedOut] = useState(false);
+
+  useEffect(() => {
+    if (qr) {
+      setTimedOut(false);
+      return;
+    }
+    const t = window.setTimeout(() => setTimedOut(true), 30_000);
+    return () => window.clearTimeout(t);
+  }, [qr]);
 
   return (
     <div className="flex min-h-[55vh] items-center justify-center">
@@ -25,6 +36,10 @@ export const SessionPairing = ({ session }: { session: SessionInfo }) => {
             </div>
           ) : session.state === "logged_out" ? (
             <Badge variant="destructive">Disconnected — use Reactivate above to get a QR</Badge>
+          ) : timedOut ? (
+            <Badge variant="muted" className="gap-1.5">
+              No QR yet — use Reactivate above to retry.
+            </Badge>
           ) : (
             <>
               <Skeleton className="h-[258px] w-[258px] rounded-lg" />

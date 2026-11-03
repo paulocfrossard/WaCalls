@@ -41,7 +41,7 @@ export const ensureSessionsWired = (): void => {
         for (const [id, qr] of Object.entries(s.qrs)) if (ids.has(id)) qrs[id] = qr;
         return { sessions: ev.sessions, qrs, activeId: pickActive(ev.sessions, s.activeId) };
       });
-    } else if (ev.type === "session-qr") {
+    } else if (ev.type === "session-qr" && ev.qr) {
       useSessions.setState((s) => ({ qrs: { ...s.qrs, [ev.sessionId]: ev.qr } }));
     } else if (ev.type === "auth-state") {
       useSessions.setState((s) => {
