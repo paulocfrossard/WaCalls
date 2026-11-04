@@ -339,7 +339,7 @@ func (s *server) doStartCall(sess *Session, w http.ResponseWriter, r *http.Reque
 
 	callID, err := sess.startOutgoing(r.Context(), peer, false)
 	if err != nil {
-		s.broker.releaseAdmission()
+		// startOutgoing already released the admission slot via removeCall.
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -485,9 +485,12 @@ func (s *server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	fds := 0
+	fds := -1
 	if entries, err := os.ReadDir("/proc/self/fd"); err == nil {
-		fds = len(entries)
+		fds = len(entries) - 1 // the directory fd itself appears in the listing
+		if fds < 0 {
+			fds = 0
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

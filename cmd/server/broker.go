@@ -61,12 +61,22 @@ func (s *subscriber) wantsEvent(ev any) bool {
 	if !ok {
 		return true
 	}
-	if sid, ok := m["sessionId"].(string); ok && sid != "" {
-		return s.wantsSession(sid)
-	}
-	// call-list is filtered separately in broadcastCallList.
+	// call-list is filtered per subscriber in broadcast.
 	if t, ok := m["type"].(string); ok && t == "call-list" {
 		return true
+	}
+	if sid, ok := m["sessionId"].(string); ok && sid != "" && !s.wantsSession(sid) {
+		return false
+	}
+	// Owner-bearing events are only delivered to the owning client (empty
+	// clientID = anonymous LAN client, which sees everything by design).
+	if s.clientID != "" {
+		if own, ok := m["owner"].(string); ok && own != "" && own != s.clientID {
+			return false
+		}
+		if own, ok := m["owner"].(*string); ok && own != nil && *own != "" && *own != s.clientID {
+			return false
+		}
 	}
 	return true
 }
@@ -78,6 +88,7 @@ type Broker struct {
 	history       []CallRecord
 	maxTotalCalls int
 	totalActive   int
+	draining      bool
 
 	SnapshotFn func() []any
 
@@ -102,11 +113,22 @@ func (b *Broker) SetMaxTotalCalls(n int) {
 func (b *Broker) tryAdmit() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.draining {
+		return false
+	}
 	if b.maxTotalCalls > 0 && b.totalActive >= b.maxTotalCalls {
 		return false
 	}
 	b.totalActive++
 	return true
+}
+
+// SetDraining rejects new calls (used on shutdown so the drain window cannot
+// admit a call that will never be terminated).
+func (b *Broker) SetDraining(v bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.draining = v
 }
 
 func (b *Broker) releaseAdmission() {
@@ -151,10 +173,6 @@ func (b *Broker) unsubscribe(s *subscriber) {
 }
 
 func (b *Broker) broadcast(ev any) {
-	data, err := json.Marshal(ev)
-	if err != nil {
-		return
-	}
 	if b.Dispatcher != nil {
 		if m, ok := ev.(map[string]any); ok {
 			if t, ok := m["type"].(string); ok {
@@ -162,32 +180,28 @@ func (b *Broker) broadcast(ev any) {
 			}
 		}
 	}
-	b.mu.RLock()
-	defer b.mu.RUnlock()
 
-	// For call-list snapshots, filter per subscriber so each client only sees
-	// calls it is allowed to (its own + unclaimed). Build per-subscriber.
+	// call-list snapshots are filtered per subscriber (owner + session).
 	if m, ok := ev.(map[string]any); ok {
 		if t, _ := m["type"].(string); t == "call-list" {
-			for s := range b.subs {
-				if !s.wantsEvent(ev) {
-					continue
-				}
-				filtered := b.filteredCallList(s)
-				payload, err := json.Marshal(map[string]any{"type": "call-list", "calls": filtered})
-				if err != nil {
-					continue
-				}
-				select {
-				case s.ch <- payload:
-				default:
-				}
-			}
+			b.broadcastCallList()
 			return
 		}
 	}
 
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+
+	b.mu.RLock()
+	subs := make([]*subscriber, 0, len(b.subs))
 	for s := range b.subs {
+		subs = append(subs, s)
+	}
+	b.mu.RUnlock()
+
+	for _, s := range subs {
 		if !s.wantsEvent(ev) {
 			continue
 		}
@@ -196,21 +210,6 @@ func (b *Broker) broadcast(ev any) {
 		default:
 		}
 	}
-}
-
-func (b *Broker) filteredCallList(s *subscriber) []CallRecord {
-	list := make([]CallRecord, 0, len(b.calls))
-	for _, c := range b.calls {
-		if c.Owner != nil && *c.Owner != s.clientID && s.clientID != "" {
-			// Hide other operators' calls from this client's list.
-			continue
-		}
-		if !s.wantsSession(c.SessionID) {
-			continue
-		}
-		list = append(list, *c)
-	}
-	return list
 }
 
 func (b *Broker) emitAuthState(sessionID string, a AuthSnapshot) {
@@ -325,12 +324,36 @@ func (b *Broker) endCall(id, reason string) {
 
 func (b *Broker) broadcastCallList() {
 	b.mu.RLock()
-	list := make([]CallRecord, 0, len(b.calls))
+	calls := make([]CallRecord, 0, len(b.calls))
 	for _, c := range b.calls {
-		list = append(list, *c)
+		calls = append(calls, *c)
+	}
+	subs := make([]*subscriber, 0, len(b.subs))
+	for s := range b.subs {
+		subs = append(subs, s)
 	}
 	b.mu.RUnlock()
-	b.broadcast(map[string]any{"type": "call-list", "calls": list})
+
+	for _, s := range subs {
+		list := make([]CallRecord, 0, len(calls))
+		for _, c := range calls {
+			if c.Owner != nil && s.clientID != "" && *c.Owner != s.clientID {
+				continue // hide other operators' calls
+			}
+			if !s.wantsSession(c.SessionID) {
+				continue
+			}
+			list = append(list, c)
+		}
+		payload, err := json.Marshal(map[string]any{"type": "call-list", "calls": list})
+		if err != nil {
+			continue
+		}
+		select {
+		case s.ch <- payload:
+		default:
+		}
+	}
 }
 
 func (b *Broker) emitIncoming(sessionID, id, peer string) {

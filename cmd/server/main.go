@@ -78,6 +78,7 @@ func main() {
 
 	<-ctx.Done()
 	log.Info("shutting down")
+	srv.broker.SetDraining(true)
 	srv.sessions.drainAll()
 	// Give terminate/reject stanzas a bounded window to be sent.
 	time.Sleep(2 * time.Second)

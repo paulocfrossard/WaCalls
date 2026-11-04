@@ -7,8 +7,9 @@ import (
 )
 
 type activeCall struct {
-	cm     *call.CallManager
-	bridge browserBridge
+	cm       *call.CallManager
+	bridge   browserBridge
+	admitted bool
 }
 
 type callRegistry struct {

@@ -60,7 +60,7 @@ func (s *Session) newCall(callID string) *call.CallManager {
 
 func (s *Session) createCall(callID string) *call.CallManager {
 	cm := s.newCallManager(callID)
-	s.reg.add(callID, &activeCall{cm: cm})
+	s.reg.add(callID, &activeCall{cm: cm, admitted: true})
 	return cm
 }
 
@@ -160,7 +160,7 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 	cm := s.newCallManager(callID)
 	// Insert atomically: if another delivery won the race between the check
 	// above and here, keep the existing call instead of overwriting it.
-	if !s.reg.addIfAbsent(callID, &activeCall{cm: cm}) {
+	if !s.reg.addIfAbsent(callID, &activeCall{cm: cm, admitted: true}) {
 		s.logDuplicateOffer(callID, evt.From)
 		s.mgr.broker.releaseAdmission()
 		return
@@ -331,7 +331,9 @@ func (s *Session) removeCall(callID string) {
 		ac.bridge.Detach()
 		ac.bridge.Close()
 	}
-	s.mgr.broker.releaseAdmission()
+	if ac.admitted {
+		s.mgr.broker.releaseAdmission()
+	}
 }
 
 func (s *Session) terminateCall(callID string, reason core.EndCallReason) {
@@ -363,7 +365,9 @@ func (s *Session) teardownAllCalls() {
 			ac.bridge.Close()
 		}
 		// drain bypasses removeCall, so release the admission slot here.
-		s.mgr.broker.releaseAdmission()
+		if ac.admitted {
+			s.mgr.broker.releaseAdmission()
+		}
 	}
 }
 
