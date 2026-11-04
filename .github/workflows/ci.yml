@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: build
+        run: go build ./...
+      - name: vet
+        run: go vet ./...
+      - name: test (race)
+        run: go test -race ./...
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "$out"; exit 1; fi
+
+  client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: install (sdk)
+        working-directory: sdk
+        run: npm ci
+      - name: typecheck (sdk)
+        working-directory: sdk
+        run: npm run typecheck
+      - name: build (sdk)
+        working-directory: sdk
+        run: npm run build
+      - name: install (client)
+        working-directory: client
+        run: npm ci
+      - name: test (client)
+        working-directory: client
+        run: npm test -- --run
+      - name: build (client)
+        working-directory: client
+        run: npm run build
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

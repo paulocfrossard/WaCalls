@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -45,6 +46,29 @@ type SessionInfo struct {
 type subscriber struct {
 	clientID string
 	ch       chan []byte
+	sessions map[string]bool // nil = all sessions
+}
+
+func (s *subscriber) wantsSession(sid string) bool {
+	if s.sessions == nil {
+		return true
+	}
+	return s.sessions[sid]
+}
+
+func (s *subscriber) wantsEvent(ev any) bool {
+	m, ok := ev.(map[string]any)
+	if !ok {
+		return true
+	}
+	if sid, ok := m["sessionId"].(string); ok && sid != "" {
+		return s.wantsSession(sid)
+	}
+	// call-list is filtered separately in broadcastCallList.
+	if t, ok := m["type"].(string); ok && t == "call-list" {
+		return true
+	}
+	return true
 }
 
 type Broker struct {
@@ -105,8 +129,14 @@ func (b *Broker) MaxTotalCalls() int {
 	return b.maxTotalCalls
 }
 
-func (b *Broker) subscribe(clientID string) *subscriber {
+func (b *Broker) subscribe(clientID string, sessions []string) *subscriber {
 	s := &subscriber{clientID: clientID, ch: make(chan []byte, 32)}
+	if len(sessions) > 0 {
+		s.sessions = make(map[string]bool, len(sessions))
+		for _, sid := range sessions {
+			s.sessions[sid] = true
+		}
+	}
 	b.mu.Lock()
 	b.subs[s] = struct{}{}
 	b.mu.Unlock()
@@ -134,12 +164,53 @@ func (b *Broker) broadcast(ev any) {
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+
+	// For call-list snapshots, filter per subscriber so each client only sees
+	// calls it is allowed to (its own + unclaimed). Build per-subscriber.
+	if m, ok := ev.(map[string]any); ok {
+		if t, _ := m["type"].(string); t == "call-list" {
+			for s := range b.subs {
+				if !s.wantsEvent(ev) {
+					continue
+				}
+				filtered := b.filteredCallList(s)
+				payload, err := json.Marshal(map[string]any{"type": "call-list", "calls": filtered})
+				if err != nil {
+					continue
+				}
+				select {
+				case s.ch <- payload:
+				default:
+				}
+			}
+			return
+		}
+	}
+
 	for s := range b.subs {
+		if !s.wantsEvent(ev) {
+			continue
+		}
 		select {
 		case s.ch <- data:
 		default:
 		}
 	}
+}
+
+func (b *Broker) filteredCallList(s *subscriber) []CallRecord {
+	list := make([]CallRecord, 0, len(b.calls))
+	for _, c := range b.calls {
+		if c.Owner != nil && *c.Owner != s.clientID && s.clientID != "" {
+			// Hide other operators' calls from this client's list.
+			continue
+		}
+		if !s.wantsSession(c.SessionID) {
+			continue
+		}
+		list = append(list, *c)
+	}
+	return list
 }
 
 func (b *Broker) emitAuthState(sessionID string, a AuthSnapshot) {
@@ -295,7 +366,17 @@ func (b *Broker) serveSSE(w http.ResponseWriter, r *http.Request, clientID strin
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	sub := b.subscribe(clientID)
+	var sessions []string
+	if v := r.URL.Query().Get("sessions"); v != "" {
+		for _, s := range strings.Split(v, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				sessions = append(sessions, s)
+			}
+		}
+	}
+
+	sub := b.subscribe(clientID, sessions)
 	defer b.unsubscribe(sub)
 
 	if b.SnapshotFn != nil {

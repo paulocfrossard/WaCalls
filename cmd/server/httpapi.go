@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +46,7 @@ func (s *server) routes() http.Handler {
 	// reports active calls and relay readiness for orchestrators.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	mux.HandleFunc("GET /api/stats", s.handleStats)
 	mux.HandleFunc("GET /api/debug/logs", s.handleDebugLogs)
 
 	if s.staticDir != "" {
@@ -477,6 +479,26 @@ func (s *server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		"status":      "ok",
 		"activeCalls": s.broker.ActiveCallCount(),
 		"maxTotal":    s.broker.MaxTotalCalls(),
+	})
+}
+
+func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	fds := 0
+	if entries, err := os.ReadDir("/proc/self/fd"); err == nil {
+		fds = len(entries)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"activeCalls": s.broker.ActiveCallCount(),
+		"maxTotal":    s.broker.MaxTotalCalls(),
+		"goroutines":  runtime.NumGoroutine(),
+		"memoryBytes": m.Alloc,
+		"sysBytes":    m.Sys,
+		"gcPauseNs":   m.PauseNs[(m.NumGC+255)%256],
+		"openFds":     fds,
 	})
 }
 func normalizePhone(p string) string {
