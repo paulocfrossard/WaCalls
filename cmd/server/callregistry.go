@@ -26,11 +26,44 @@ func (r *callRegistry) add(callID string, ac *activeCall) {
 	r.calls[callID] = ac
 }
 
+// addIfAbsent inserts ac only when callID is free, in one critical section.
+// It returns false if the slot was already taken, so callers never overwrite
+// (and orphan) a live call's CallManager.
+func (r *callRegistry) addIfAbsent(callID string, ac *activeCall) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.calls[callID]; ok {
+		return false
+	}
+	r.calls[callID] = ac
+	return true
+}
+
 func (r *callRegistry) get(callID string) (*activeCall, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ac, ok := r.calls[callID]
 	return ac, ok
+}
+
+// getWithBridge snapshots the manager and bridge together under the lock, so
+// callers do not race with setBridge mutating the bridge field.
+func (r *callRegistry) getWithBridge(callID string) (*call.CallManager, *Bridge, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ac, ok := r.calls[callID]
+	if !ok {
+		return nil, nil, false
+	}
+	return ac.cm, ac.bridge, true
+}
+
+// bridgeIs reports whether callID is still owned by b.
+func (r *callRegistry) bridgeIs(callID string, b *Bridge) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ac, ok := r.calls[callID]
+	return ok && ac.bridge == b
 }
 
 func (r *callRegistry) remove(callID string) (*activeCall, bool) {
