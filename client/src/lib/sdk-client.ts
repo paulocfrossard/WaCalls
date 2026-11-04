@@ -29,7 +29,10 @@ if (typeof window !== "undefined") {
   // End the active call server-side when the tab is closed/navigated away,
   // instead of waiting for the ICE timeout. disconnect() fires a keepalive
   // DELETE for the owned call before local teardown.
-  window.addEventListener("pagehide", () => {
+  window.addEventListener("pagehide", (e) => {
+    // Skip bfcache transitions: the page may be restored, and disconnect()
+    // permanently stops the client. A real unload has persisted === false.
+    if (e.persisted) return;
     sdkClient.disconnect();
   });
 }

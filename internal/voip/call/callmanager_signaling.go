@@ -163,14 +163,17 @@ func (m *CallManager) HandleCallAccept(ctx context.Context, node *waBinary.Node,
 	m.initSrtpKeysLocked()
 	hasConn := m.relay.HasConnection()
 	relayData := call.RelayData
+	calleeDevices := append([]types.JID(nil), m.calleeDevices...)
+	basePeer := call.PeerJid
+	m.mu.Unlock()
+
+	// Resolve sibling identity outside the lock (may hit the network).
 	var siblings []types.JID
-	for _, dev := range m.calleeDevices {
+	for _, dev := range calleeDevices {
 		if !m.samePeerJID(dev.String(), peerJid.String()) {
 			siblings = append(siblings, dev)
 		}
 	}
-	basePeer := call.PeerJid
-	m.mu.Unlock()
 
 	m.log.Info("remote accepted call", "call_id", call.CallID, "peer", peerJid.String(),
 		"relay_connected", hasConn, "relay_endpoints", relayEndpointCount(relayData))
@@ -313,32 +316,39 @@ func (m *CallManager) HandleCallAck(ctx context.Context, node *waBinary.Node) {
 }
 
 func (m *CallManager) HandleCallTerminate(node *waBinary.Node) {
+	sender := wanode.AttrString(node.Attrs, "from")
+
 	m.mu.Lock()
 	call := m.currentCall
-	if call == nil {
-		m.mu.Unlock()
+	acc := m.acceptedByJid
+	m.mu.Unlock()
+	if call == nil || call.IsEnded() {
 		return
 	}
-	if call.IsEnded() {
-		m.mu.Unlock()
-		return
-	}
-	// After an accept, only the answering device may end the call. A sibling that
-	// kept ringing eventually times out and sends its own reject/terminate, which
-	// must not tear down the live call.
-	sender := wanode.AttrString(node.Attrs, "from")
-	if m.acceptedByJid != "" && sender != "" && !m.samePeerJID(sender, m.acceptedByJid) && !call.IsEnded() {
-		m.mu.Unlock()
+	// After an accept, only the answering device may end the call. A sibling
+	// that kept ringing times out and sends its own reject/terminate, which
+	// must not tear down the live call. Resolve identity OUTSIDE the lock:
+	// samePeerJID may hit the network (ResolveLIDForPN).
+	if acc != "" && sender != "" && !m.samePeerJID(sender, acc) {
 		m.log.Info("terminate from non-answering device ignored",
-			"call_id", call.CallID, "from", sender, "accepted_by", m.acceptedByJid)
+			"call_id", call.CallID, "from", sender, "accepted_by", acc)
 		return
 	}
+
 	info := signaling.ExtractNodeInfo(node)
 	reason := core.EndCallReasonUserEnded
 	if info != nil {
 		if r := wanode.AttrString(info.InnerNode.Attrs, "reason"); r != "" {
 			reason = core.EndCallReason(r)
 		}
+	}
+
+	m.mu.Lock()
+	// Re-check under the lock: the call may have ended/changed during the
+	// identity resolution above.
+	if m.currentCall != call || call.IsEnded() {
+		m.mu.Unlock()
+		return
 	}
 	m.log.Info("call terminated by peer", "call_id", call.CallID, "reason", string(reason))
 	_ = call.ApplyTransition(Transition{Type: TransitionTerminated, Reason: reason})

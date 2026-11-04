@@ -366,6 +366,7 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
 		return
 	}
+	s.broker.broadcastCallList()
 	var body struct {
 		SDPOffer string `json:"sdp_offer"`
 	}
@@ -428,6 +429,7 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
 		return
 	}
+	s.broker.broadcastCallList()
 	s.broker.emitIncomingClaimed(sess.id, id, owner)
 	if err := ac.cm.AcceptCall(r.Context(), id); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
