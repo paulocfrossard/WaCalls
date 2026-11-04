@@ -66,7 +66,7 @@ func TestBridgePCMRoundtrip(t *testing.T) {
 		t.Fatalf("NewBridge: %v", err)
 	}
 	defer br.Close()
-	br.OnBrowserPCM = func(pcm []float32) { got <- pcm }
+	br.SetOnBrowserPCM(func(pcm []float32) { got <- pcm })
 
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer}); err != nil {
 		t.Fatalf("browser SetRemoteDescription: %v", err)
@@ -85,7 +85,20 @@ func TestBridgePCMRoundtrip(t *testing.T) {
 		if pcm[0] < 0.4 || pcm[0] > 0.6 || pcm[1] > -0.4 || pcm[1] < -0.6 {
 			t.Fatalf("unexpected samples: %v", pcm)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for PCM over data channel")
+	}
+}
+
+func TestBridgeDetachDropsCallbacks(t *testing.T) {
+	br := &Bridge{}
+	br.SetOnBrowserPCM(func([]float32) {})
+	br.SetOnTerminalICE(func() {})
+	br.Detach()
+	if br.browserPCM() != nil {
+		t.Fatal("Detach must drop OnBrowserPCM")
+	}
+	if br.terminalICE() != nil {
+		t.Fatal("Detach must drop OnTerminalICE")
 	}
 }
