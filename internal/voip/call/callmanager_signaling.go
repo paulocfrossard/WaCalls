@@ -17,9 +17,9 @@ func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, 
 		return
 	}
 	m.mu.Lock()
-	if m.currentCall != nil {
+	if m.currentCall != nil && !m.currentCall.IsEnded() {
 		m.mu.Unlock()
-		m.log.Warn("HandleCallOffer ignored: call already present", "call_id", info.CallID, "ended", m.currentCall.IsEnded())
+		m.log.Warn("HandleCallOffer ignored: call already in progress", "call_id", info.CallID)
 		return
 	}
 	m.mu.Unlock()
@@ -57,6 +57,11 @@ func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, 
 	}
 
 	m.mu.Lock()
+	if m.currentCall != nil && !m.currentCall.IsEnded() {
+		m.mu.Unlock()
+		m.log.Warn("HandleCallOffer ignored: call already in progress", "call_id", callID)
+		return
+	}
 	call := NewIncomingCall(callID, peerJid.String(), creator, "", mediaType)
 	if callKey != nil {
 		call.EncryptionKey = callKey

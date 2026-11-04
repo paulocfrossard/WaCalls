@@ -366,6 +366,7 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 	}
 	bridge, answer, err := NewBridge(body.SDPOffer, s.log)
 	if err != nil {
+		sess.removeCall(callID)
 		s.broker.endCall(callID, string(core.EndCallReasonUserEnded))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
