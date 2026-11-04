@@ -43,6 +43,9 @@ type CallManager struct {
 	lastCaptureAt time.Time
 	keepaliveStop chan struct{}
 
+	// now is injectable for tests (defaults to time.Now).
+	now func() time.Time
+
 	// seenRTP drops packets delivered by more than one relay connection
 	// (the relay fan-out duplicates the peer stream). Keyed by ssrc<<16|seq.
 	seenRTP      map[uint64]time.Time
@@ -68,6 +71,53 @@ func NewCallManager(sock core.VoipSocket, log *slog.Logger) *CallManager {
 	relay.SetOnReceive(func(data []byte) { m.onRelayData(data) })
 	m.relay = relay
 	return m
+}
+
+// Deps lets tests (and advanced callers) inject the relay transport, codec and
+// clock instead of the production defaults.
+type Deps struct {
+	Sock  core.VoipSocket
+	Log   *slog.Logger
+	Relay RelayTransport
+	Codec media.Codec
+	Now   func() time.Time
+}
+
+// NewCallManagerWithDeps builds a CallManager from injected dependencies. A nil
+// Relay/Codec/Log/Now falls back to the production default, so callers can
+// override only what they need.
+func NewCallManagerWithDeps(d Deps) *CallManager {
+	log := d.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	m := &CallManager{
+		sock:        d.Sock,
+		log:         log,
+		debeEnabled: true,
+		now:         d.Now,
+	}
+	if d.Relay != nil {
+		m.relay = d.Relay
+		d.Relay.SetOnConnected(func(ip string, port int) { m.onRelayConnected() })
+		d.Relay.SetOnReceive(func(data []byte) { m.onRelayData(data) })
+	} else {
+		relay := transport.NewSctpRelayManager(log)
+		relay.SetOnConnected(func(ip string, port int) { m.onRelayConnected() })
+		relay.SetOnReceive(func(data []byte) { m.onRelayData(data) })
+		m.relay = relay
+	}
+	if d.Codec != nil {
+		m.codec = d.Codec
+	}
+	return m
+}
+
+func (m *CallManager) nowTime() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
 }
 
 func (m *CallManager) CurrentCall() *CallInfo {
@@ -291,7 +341,7 @@ func (m *CallManager) ownBaseJIDs() []string {
 // isDuplicateRTPPacketLocked reports whether (ssrc, seq) was already handled
 // within the last 2s. Callers must hold m.mu.
 func (m *CallManager) isDuplicateRTPPacketLocked(ssrc uint32, seq uint16) bool {
-	now := time.Now()
+	now := m.nowTime()
 	if m.seenRTP == nil {
 		m.seenRTP = make(map[uint64]time.Time, 256)
 	}

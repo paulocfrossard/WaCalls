@@ -8,7 +8,7 @@ import (
 
 type activeCall struct {
 	cm     *call.CallManager
-	bridge *Bridge
+	bridge browserBridge
 }
 
 type callRegistry struct {
@@ -48,7 +48,7 @@ func (r *callRegistry) get(callID string) (*activeCall, bool) {
 
 // getWithBridge snapshots the manager and bridge together under the lock, so
 // callers do not race with setBridge mutating the bridge field.
-func (r *callRegistry) getWithBridge(callID string) (*call.CallManager, *Bridge, bool) {
+func (r *callRegistry) getWithBridge(callID string) (*call.CallManager, browserBridge, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ac, ok := r.calls[callID]
@@ -83,7 +83,7 @@ func (r *callRegistry) count() int {
 	return len(r.calls)
 }
 
-func (r *callRegistry) setBridge(callID string, b *Bridge) (*Bridge, bool) {
+func (r *callRegistry) setBridge(callID string, b browserBridge) (browserBridge, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ac, ok := r.calls[callID]

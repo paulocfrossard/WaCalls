@@ -371,7 +371,7 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sdp_offer required"})
 		return
 	}
-	bridge, answer, err := NewBridge(body.SDPOffer, s.log)
+	bridge, answer, err := s.newBridge(body.SDPOffer, s.log)
 	if err != nil {
 		sess.removeCall(callID)
 		s.broker.endCall(callID, string(core.EndCallReasonUserEnded))

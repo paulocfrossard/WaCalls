@@ -17,6 +17,8 @@ type server struct {
 	log       *slog.Logger
 	staticDir string
 
+	newBridge func(offerSDP string, log *slog.Logger) (*Bridge, string, error)
+
 	// webhookAllowHosts, when non-empty, restricts webhook registration and
 	// delivery to these exact hostnames (case-insensitive, any port).
 	webhookAllowHosts []string
@@ -32,7 +34,7 @@ func openDB(dbPath string) (*sql.DB, error) {
 	return db, nil
 }
 
-func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, webhookAllowHosts []string, log *slog.Logger) (*server, error) {
+func newServer(ctx context.Context, dbPath, staticDir string, maxCalls, maxTotalCalls int, webhookAllowHosts []string, log *slog.Logger) (*server, error) {
 	db, err := openDB(dbPath)
 	if err != nil {
 		return nil, err
@@ -57,11 +59,14 @@ func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, webh
 	}
 
 	broker := NewBroker()
+	broker.SetMaxTotalCalls(maxTotalCalls)
 	worker := newWebhookWorker(whStore, log, webhookAllowHosts)
 	broker.Dispatcher = worker
 	worker.Start(ctx, 5)
 	mgr := newSessionManager(ctx, container, broker, store, waLogger, log, maxCalls)
 	broker.SnapshotFn = mgr.snapshotEvents
 
-	return &server{broker: broker, sessions: mgr, webhooks: whStore, log: log, staticDir: staticDir, webhookAllowHosts: webhookAllowHosts}, nil
+	srv := &server{broker: broker, sessions: mgr, webhooks: whStore, log: log, staticDir: staticDir, webhookAllowHosts: webhookAllowHosts}
+	srv.newBridge = NewBridge
+	return srv, nil
 }

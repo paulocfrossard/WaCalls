@@ -31,6 +31,8 @@ type Session struct {
 	client *whatsmeow.Client
 	reg    *callRegistry
 
+	newCallManager func(callID string) *call.CallManager
+
 	mu   sync.Mutex
 	auth AuthSnapshot
 }
@@ -45,6 +47,7 @@ func newSession(mgr *SessionManager, id, name string, client *whatsmeow.Client) 
 		auth:   AuthSnapshot{State: "connecting"},
 		reg:    newCallRegistry(),
 	}
+	s.newCallManager = s.newCall
 	client.AddEventHandler(s.handleEvent)
 	return s
 }
@@ -56,7 +59,7 @@ func (s *Session) newCall(callID string) *call.CallManager {
 }
 
 func (s *Session) createCall(callID string) *call.CallManager {
-	cm := s.newCall(callID)
+	cm := s.newCallManager(callID)
 	s.reg.add(callID, &activeCall{cm: cm})
 	return cm
 }
@@ -150,7 +153,11 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 		s.rejectOffer(ctx, node, evt.From)
 		return
 	}
-	cm := s.newCall(callID)
+	if !s.mgr.broker.tryAdmit() {
+		s.rejectOffer(ctx, node, evt.From)
+		return
+	}
+	cm := s.newCallManager(callID)
 	// Insert atomically: if another delivery won the race between the check
 	// above and here, keep the existing call instead of overwriting it.
 	if !s.reg.addIfAbsent(callID, &activeCall{cm: cm}) {
@@ -323,6 +330,7 @@ func (s *Session) removeCall(callID string) {
 		ac.bridge.Detach()
 		ac.bridge.Close()
 	}
+	s.mgr.broker.releaseAdmission()
 }
 
 func (s *Session) terminateCall(callID string, reason core.EndCallReason) {
