@@ -184,6 +184,11 @@ func (s *Session) rejectOffer(ctx context.Context, node *waBinary.Node, from typ
 }
 
 func (s *Session) handleEvent(rawEvt any) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("panic in event handler", "session", s.id, "panic", r)
+		}
+	}()
 	ctx := context.Background()
 	switch evt := rawEvt.(type) {
 	case *events.Connected:
