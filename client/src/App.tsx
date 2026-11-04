@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { PlusCircle } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
@@ -12,8 +12,15 @@ import { ensureSessionsWired, useSessions } from "@/stores/sessions";
 import { ensureCallsWired } from "@/stores/calls";
 import { useTheme } from "@/stores/theme";
 import { useUi } from "@/stores/ui";
-import { DebugPage } from "@/pages/DebugPage";
-import { SettingsPage } from "@/pages/SettingsPage";
+
+// Secondary views are code-split: they are not needed for the initial call
+// screen and keep the first-load bundle under the size budget.
+const DebugPage = lazy(() =>
+  import("@/pages/DebugPage").then((m) => ({ default: m.DebugPage })),
+);
+const SettingsPage = lazy(() =>
+  import("@/pages/SettingsPage").then((m) => ({ default: m.SettingsPage })),
+);
 
 export const App = () => {
   const sessions = useSessions((s) => s.sessions);
@@ -32,9 +39,13 @@ export const App = () => {
     <TooltipProvider delayDuration={200}>
       <AppShell>
         {view === "debug" ? (
-          <DebugPage />
+          <Suspense fallback={null}>
+            <DebugPage />
+          </Suspense>
         ) : view === "settings" ? (
-          <SettingsPage />
+          <Suspense fallback={null}>
+            <SettingsPage />
+          </Suspense>
         ) : sessions.length === 0 ? (
           <EmptyState
             icon={<PlusCircle className="h-6 w-6" />}
