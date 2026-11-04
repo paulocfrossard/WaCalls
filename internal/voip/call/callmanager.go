@@ -192,14 +192,28 @@ func (m *CallManager) StartCall(ctx context.Context, callID string, peerJid type
 	return nil
 }
 
-// AlreadyAccepted reports whether the current call has moved past the ringing
-// state but is not ended (i.e. a retried accept is a no-op, not a failure that
-// should tear the call down).
-func (m *CallManager) AlreadyAccepted() bool {
+// AlreadyAccepted reports whether the given id is an inbound call that has
+// moved past ringing but is not ended (a retried accept is a no-op, not a
+// failure that should tear the call down).
+func (m *CallManager) AlreadyAccepted(callID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	c := m.currentCall
-	return c != nil && !c.CanAccept() && !c.IsEnded()
+	return c != nil && c.CallID == callID &&
+		c.Direction == core.CallDirectionIncoming &&
+		!c.CanAccept() && !c.IsEnded()
+}
+
+// EndCallForID ends the call only when it still matches callID, so a stale id
+// can never terminate a different live call on the same manager.
+func (m *CallManager) EndCallForID(ctx context.Context, callID string, reason core.EndCallReason) error {
+	m.mu.Lock()
+	match := m.currentCall != nil && m.currentCall.CallID == callID
+	m.mu.Unlock()
+	if !match {
+		return nil
+	}
+	return m.EndCall(ctx, reason)
 }
 
 func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
@@ -222,13 +236,15 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 	relayData := call.RelayData
 	m.mu.Unlock()
 
-	if key != nil {
-		acceptNode, err := signaling.BuildAcceptStanza(ctx, m.sock, callID, key, peer, creator, isVideo)
-		if err != nil {
-			m.log.Error("build accept failed", "err", err)
-		} else if err := m.sock.SendNode(ctx, acceptNode); err != nil {
-			m.log.Error("accept send error", "err", err)
-		}
+	if key == nil {
+		return &CallError{"accept failed: missing call key"}
+	}
+	acceptNode, err := signaling.BuildAcceptStanza(ctx, m.sock, callID, key, peer, creator, isVideo)
+	if err != nil {
+		return &CallError{"build accept failed: " + err.Error()}
+	}
+	if err := m.sock.SendNode(ctx, acceptNode); err != nil {
+		return &CallError{"send accept failed: " + err.Error()}
 	}
 
 	if relayData != nil {

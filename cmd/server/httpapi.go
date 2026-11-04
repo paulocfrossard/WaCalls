@@ -437,13 +437,13 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 	if err := ac.cm.AcceptCall(r.Context(), id); err != nil {
 		// A retried accept on an already-accepted call is a no-op, not a
 		// failure: never tear down a live call.
-		if ac.cm.AlreadyAccepted() {
+		if ac.cm.AlreadyAccepted(id) {
 			writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": id}})
 			return
 		}
-		// Real failure: stop the manager and roll back the claim so the call
-		// does not stay owned with no media and other operators can retry.
-		_ = ac.cm.EndCall(r.Context(), core.EndCallReasonUserEnded)
+		// Real failure: stop THIS call and roll back the claim so it does not
+		// stay owned with no media and other operators can retry.
+		_ = ac.cm.EndCallForID(r.Context(), id, core.EndCallReasonUserEnded)
 		sess.removeCall(id)
 		s.broker.endCall(id, string(core.EndCallReasonUserEnded))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
