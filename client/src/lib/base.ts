@@ -62,22 +62,7 @@ export function normalizeBaseUrl(raw: string, protocol: string = (typeof window 
  * localStorage → build-time env → "".
  */
 export function resolveBaseUrl(): string {
-  if (sessionBase !== null) return sessionBase;
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored !== null) {
-      const n = normalizeBaseUrl(stored);
-      if (n.ok) return n.value;
-    }
-  } catch {
-    // storage disabled / private mode → fall through
-  }
-  const env = import.meta.env.VITE_WACALLS_BASE_URL;
-  if (typeof env === "string" && env.trim() !== "") {
-    const n = normalizeBaseUrl(env);
-    if (n.ok) return n.value;
-  }
-  return "";
+  return resolveBaseUrlDetailed().value;
 }
 
 export function resolveBaseUrlDetailed(): ResolvedBase {
@@ -125,6 +110,10 @@ export function persistBaseUrl(raw: string): { ok: true; sessionOnly?: false } |
     return { ok: true, sessionOnly: true };
   }
   return { ok: true };
+}
+
+export function isSessionOnlyBase(): boolean {
+  return sessionBase !== null;
 }
 
 export function clearBaseUrl(): void {
