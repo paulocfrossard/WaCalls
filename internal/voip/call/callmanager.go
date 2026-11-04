@@ -42,6 +42,11 @@ type CallManager struct {
 	lastCaptureAt time.Time
 	keepaliveStop chan struct{}
 
+	// seenRTP drops packets delivered by more than one relay connection
+	// (the relay fan-out duplicates the peer stream). Keyed by ssrc<<16|seq.
+	seenRTP      map[uint64]time.Time
+	seenRTPPrune time.Time
+
 	OnStateChange func(*CallInfo)
 	OnIncoming    func(*CallInfo)
 	OnEnded       func(*CallInfo)
@@ -172,15 +177,18 @@ func (m *CallManager) setupIncomingMedia(call *CallInfo, relayData *core.RelayDa
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(relayData.ParticipantJids) > 0 {
-		ourBase := wanode.CleanJID(m.ownCredJid())
-		ourDeviceJid := ensureDeviceJid(findOurDevice(relayData.ParticipantJids, ourBase, m.ownCredJid()))
+		ourBases := m.ownBaseJIDs()
+		ourDeviceJid := ensureDeviceJid(findOurDevice(relayData.ParticipantJids, ourBases, m.ownCredJid()))
 		if newSelf := media.GenerateSecureSsrc(call.CallID, ourDeviceJid, 0); newSelf != m.selfSsrc {
 			m.selfSsrc = newSelf
 			m.rtpSession = media.NewWhatsAppOpusSession(newSelf)
 		}
-		if peer := firstPeerDevice(relayData.ParticipantJids, ourBase); peer != "" {
+		if peer := firstPeerDevice(relayData.ParticipantJids, ourBases); peer != "" {
 			m.peerSsrcs = []uint32{media.GenerateSecureSsrc(call.CallID, ensureDeviceJid(peer), 0)}
 			m.actualPeerSet = true
+		} else {
+			m.actualPeerSet = false
+			m.log.Warn("participant list has no peer device; waiting for first RTP packet to learn SSRC", "call_id", call.CallID)
 		}
 	}
 	m.relay.SetSubscriptionSsrc(firstSsrc(m.peerSsrcs))
@@ -199,7 +207,11 @@ func (m *CallManager) RejectCall(ctx context.Context, callID string, reason core
 	m.emitState()
 	m.mu.Unlock()
 
-	go func() { _, _ = m.sock.Query(ctx, node) }()
+	go func() {
+		sendCtx, cancel := detachedSendContext(ctx)
+		defer cancel()
+		_, _ = m.sock.Query(sendCtx, node)
+	}()
 	m.cleanupMedia()
 	return nil
 }
@@ -217,7 +229,11 @@ func (m *CallManager) EndCall(ctx context.Context, reason core.EndCallReason) er
 	m.emitState()
 	m.mu.Unlock()
 
-	go func() { _, _ = m.sock.Query(ctx, node) }()
+	go func() {
+		sendCtx, cancel := detachedSendContext(ctx)
+		defer cancel()
+		_, _ = m.sock.Query(sendCtx, node)
+	}()
 	if m.OnEnded != nil {
 		m.OnEnded(ended)
 	}
@@ -233,6 +249,65 @@ func (m *CallManager) ownCredJid() string {
 	return m.sock.OwnPN().String()
 }
 
+// ownBaseJIDs lists every identity this device may appear as in a
+// participant list (WhatsApp now mixes LID and PN). Matching only one of
+// them makes findOurDevice miss self and firstPeerDevice pick our own
+// device, which subscribes the relay to our own SSRC (one-way audio/echo).
+func (m *CallManager) ownBaseJIDs() []string {
+	var out []string
+	if lid := m.sock.OwnLID(); !lid.IsEmpty() {
+		out = append(out, wanode.CleanJID(lid.String()))
+	}
+	if pn := m.sock.OwnPN(); !pn.IsEmpty() {
+		clean := wanode.CleanJID(pn.String())
+		dup := false
+		for _, b := range out {
+			if b == clean {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, clean)
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, wanode.CleanJID(m.ownCredJid()))
+	}
+	return out
+}
+
+// isDuplicateRTPPacketLocked reports whether (ssrc, seq) was already handled
+// within the last 2s. Callers must hold m.mu.
+func (m *CallManager) isDuplicateRTPPacketLocked(ssrc uint32, seq uint16) bool {
+	now := time.Now()
+	if m.seenRTP == nil {
+		m.seenRTP = make(map[uint64]time.Time, 256)
+	}
+	key := uint64(ssrc)<<16 | uint64(seq)
+	if t, ok := m.seenRTP[key]; ok && now.Sub(t) < 2*time.Second {
+		return true
+	}
+	m.seenRTP[key] = now
+	if now.Sub(m.seenRTPPrune) > 2*time.Second {
+		for k, t := range m.seenRTP {
+			if now.Sub(t) > 2*time.Second {
+				delete(m.seenRTP, k)
+			}
+		}
+		m.seenRTPPrune = now
+	}
+	return false
+}
+
 type CallError struct{ Msg string }
 
 func (e *CallError) Error() string { return e.Msg }
+
+// detachedSendContext keeps a detached send alive after the caller (usually
+// an HTTP handler) returns and cancels its request context. Without this the
+// terminate/reject stanza can be aborted before reaching WhatsApp, leaving
+// the peer's call up.
+func detachedSendContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+}
