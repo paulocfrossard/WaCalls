@@ -67,3 +67,31 @@ func TestBridgeIsRejectsStale(t *testing.T) {
 		t.Fatal("new bridge must be current")
 	}
 }
+
+func TestAdmissionCapAndRelease(t *testing.T) {
+	b := NewBroker()
+	b.SetMaxTotalCalls(2)
+	if !b.tryAdmit() || !b.tryAdmit() {
+		t.Fatal("first two admissions must succeed")
+	}
+	if b.tryAdmit() {
+		t.Fatal("third admission must be rejected at cap 2")
+	}
+	if b.ActiveCallCount() != 2 {
+		t.Fatalf("active=%d want 2", b.ActiveCallCount())
+	}
+	b.releaseAdmission()
+	if b.ActiveCallCount() != 1 {
+		t.Fatalf("active=%d want 1", b.ActiveCallCount())
+	}
+	if !b.tryAdmit() {
+		t.Fatal("admission must succeed after release")
+	}
+	// Releasing more than admitted must not go negative.
+	b.releaseAdmission()
+	b.releaseAdmission()
+	b.releaseAdmission()
+	if b.ActiveCallCount() != 0 {
+		t.Fatalf("active=%d want 0 (must not go negative)", b.ActiveCallCount())
+	}
+}

@@ -362,6 +362,8 @@ func (s *Session) teardownAllCalls() {
 			ac.bridge.Detach()
 			ac.bridge.Close()
 		}
+		// drain bypasses removeCall, so release the admission slot here.
+		s.mgr.broker.releaseAdmission()
 	}
 }
 
