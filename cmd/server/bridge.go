@@ -88,6 +88,13 @@ func NewBridge(offerSDP string, log *slog.Logger) (*Bridge, string, error) {
 		}
 		br.dc.Store(dc)
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			defer func() {
+				if r := recover(); r != nil {
+					logbuf.LogEvent("bridge", logbuf.LevelError, "panic in browser pcm callback", map[string]any{
+						"call_id": br.callID, "panic": r,
+					})
+				}
+			}()
 			cb := br.browserPCM()
 			if cb != nil && len(msg.Data) > 0 {
 				// Rate-limited 5/s: the mic pushes ~125 messages/s.
@@ -103,6 +110,13 @@ func NewBridge(offerSDP string, log *slog.Logger) (*Bridge, string, error) {
 	})
 
 	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
+		defer func() {
+			if r := recover(); r != nil {
+				logbuf.LogEvent("bridge", logbuf.LevelError, "panic in terminal ice callback", map[string]any{
+					"call_id": br.callID, "panic": r,
+				})
+			}
+		}()
 		log.Debug("browser ice state", "state", s.String())
 		if s == webrtc.ICEConnectionStateFailed || s == webrtc.ICEConnectionStateClosed {
 			if cb := br.terminalICE(); cb != nil {
