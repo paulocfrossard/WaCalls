@@ -204,3 +204,17 @@ func (m *SessionManager) disconnectAll() {
 		s.shutdown()
 	}
 }
+
+// drainAll ends every call on every session and gives terminate stanzas a
+// bounded window to be sent before the process exits.
+func (m *SessionManager) drainAll() {
+	m.mu.RLock()
+	all := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		all = append(all, s)
+	}
+	m.mu.RUnlock()
+	for _, s := range all {
+		s.teardownAllCalls()
+	}
+}

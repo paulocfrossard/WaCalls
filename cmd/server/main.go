@@ -21,8 +21,9 @@ func main() {
 	dbPath := flag.String("db", "wacalls.db", "SQLite session database path")
 	staticDir := flag.String("static", "client/dist", "static client directory (optional)")
 	debug := flag.Bool("debug", false, "verbose logging")
-	debugLog := flag.Bool("debug-log", true, "emit audio diagnostic events to the in-memory ring served at GET /api/debug/logs")
+	debugLog := flag.Bool("debug-log", false, "emit audio diagnostic events to the in-memory ring served at GET /api/debug/logs")
 	maxCalls := flag.Int("max-calls-per-session", 8, "max concurrent calls per session (0 = unlimited)")
+	maxTotalCalls := flag.Int("max-total-calls", 0, "max concurrent calls across all sessions (0 = unlimited)")
 	authSRTP := flag.Bool("srtp-auth", true, "verify SRTP HMAC tag on receive (legacy: false)")
 	webhookAllowHosts := flag.String("webhook-allow-hosts", "", "comma-separated hostnames webhooks may target (empty = any host)")
 	flag.Parse()
@@ -45,7 +46,7 @@ func main() {
 	if *debug {
 		level = slog.LevelDebug
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -55,7 +56,7 @@ func main() {
 	// writes for the same call land <50ms apart = duplicated audio path.
 	go logbuf.StartDupDetector(ctx)
 
-	srv, err := newServer(ctx, *dbPath, *staticDir, *maxCalls, allowHosts, log)
+	srv, err := newServer(ctx, *dbPath, *staticDir, *maxCalls, *maxTotalCalls, allowHosts, log)
 	if err != nil {
 		log.Error("startup failed", "err", err)
 		os.Exit(1)
@@ -77,6 +78,9 @@ func main() {
 
 	<-ctx.Done()
 	log.Info("shutting down")
+	srv.sessions.drainAll()
+	// Give terminate/reject stanzas a bounded window to be sent.
+	time.Sleep(2 * time.Second)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)

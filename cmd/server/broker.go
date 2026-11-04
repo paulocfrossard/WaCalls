@@ -48,10 +48,12 @@ type subscriber struct {
 }
 
 type Broker struct {
-	mu      sync.RWMutex
-	subs    map[*subscriber]struct{}
-	calls   map[string]*CallRecord
-	history []CallRecord
+	mu            sync.RWMutex
+	subs          map[*subscriber]struct{}
+	calls         map[string]*CallRecord
+	history       []CallRecord
+	maxTotalCalls int
+	totalActive   int
 
 	SnapshotFn func() []any
 
@@ -65,6 +67,42 @@ func NewBroker() *Broker {
 		subs:  map[*subscriber]struct{}{},
 		calls: map[string]*CallRecord{},
 	}
+}
+
+func (b *Broker) SetMaxTotalCalls(n int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.maxTotalCalls = n
+}
+
+func (b *Broker) tryAdmit() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.maxTotalCalls > 0 && b.totalActive >= b.maxTotalCalls {
+		return false
+	}
+	b.totalActive++
+	return true
+}
+
+func (b *Broker) releaseAdmission() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.totalActive > 0 {
+		b.totalActive--
+	}
+}
+
+func (b *Broker) ActiveCallCount() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.totalActive
+}
+
+func (b *Broker) MaxTotalCalls() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.maxTotalCalls
 }
 
 func (b *Broker) subscribe(clientID string) *subscriber {

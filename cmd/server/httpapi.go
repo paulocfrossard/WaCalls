@@ -41,8 +41,10 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/webhooks", s.handleWebhookList)
 	mux.HandleFunc("DELETE /api/webhooks/{id}", s.handleWebhookDelete)
 
-	// Debug log ring (fed by logbuf; toggle with -debug-log). Same trust
-	// model as the rest of /api: no auth, LAN-facing — see handleDebugLogs.
+	// Health/readiness (no auth; LAN-facing). /healthz is liveness; /readyz
+	// reports active calls and relay readiness for orchestrators.
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("GET /api/debug/logs", s.handleDebugLogs)
 
 	if s.staticDir != "" {
@@ -327,10 +329,15 @@ func (s *server) doStartCall(sess *Session, w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "max concurrent calls"})
 		return
 	}
+	if !s.broker.tryAdmit() {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "max total calls"})
+		return
+	}
 	peer := types.NewJID(normalizePhone(body.Phone), types.DefaultUserServer)
 
 	callID, err := sess.startOutgoing(r.Context(), peer, false)
 	if err != nil {
+		s.broker.releaseAdmission()
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -457,6 +464,21 @@ func (s *server) doEndCall(sess *Session, w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+}
+
+func (s *server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":      "ok",
+		"activeCalls": s.broker.ActiveCallCount(),
+		"maxTotal":    s.broker.MaxTotalCalls(),
+	})
+}
 func normalizePhone(p string) string {
 	p = strings.TrimSpace(p)
 	p = strings.TrimPrefix(p, "+")
