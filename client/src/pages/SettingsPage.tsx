@@ -9,6 +9,7 @@ import { useUi } from "@/stores/ui";
 import { reconfigureSdk } from "@/lib/sdk-client";
 import {
   clearBaseUrl,
+  isSessionOnlyBase,
   normalizeBaseUrl,
   persistBaseUrl,
   resolveBaseUrl,
@@ -22,7 +23,7 @@ export const SettingsPage = () => {
   const setView = useUi((s) => s.setView);
   const [draft, setDraft] = useState(() => resolveBaseUrl());
   const [error, setError] = useState<string | null>(null);
-  const [storageWarning, setStorageWarning] = useState(false);
+  const [storageWarning, setStorageWarning] = useState(() => isSessionOnlyBase());
   const [effective, setEffective] = useState(() => resolveBaseUrl());
   const [source, setSource] = useState<"panel" | "build" | "fallback">(() => resolveSource());
 
@@ -46,7 +47,7 @@ export const SettingsPage = () => {
     setDraft(next);
     setEffective(next);
     setSource(resolveSource());
-    toast.success(sessionOnly ? "Base URL saved (session only)" : "Base URL saved");
+    toast.success(result.value === "" ? "Base URL cleared" : sessionOnly ? "Base URL saved (session only)" : "Base URL saved");
   };
 
   const handleReset = () => {
@@ -116,7 +117,7 @@ export const SettingsPage = () => {
                 aria-invalid={error ? "true" : undefined}
               />
               <p id="wacalls-base-url-hint" className="text-xs text-muted-foreground">
-                Empty = same-origin root. Used for REST (<code className="font-mono">{apiExample}</code>) and SSE (<code className="font-mono">{sseExample}</code>).
+                Empty = same-origin root. Non-ASCII hostnames must be punycode (xn--…). Used for REST (<code className="font-mono">{apiExample}</code>) and SSE (<code className="font-mono">{sseExample}</code>).
               </p>
               {error && (
                 <p id="wacalls-base-url-error" role="alert" className="text-xs text-destructive">
