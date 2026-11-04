@@ -495,13 +495,14 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"activeCalls": s.broker.ActiveCallCount(),
-		"maxTotal":    s.broker.MaxTotalCalls(),
-		"goroutines":  runtime.NumGoroutine(),
-		"memoryBytes": m.Alloc,
-		"sysBytes":    m.Sys,
-		"gcPauseNs":   m.PauseNs[(m.NumGC+255)%256],
-		"openFds":     fds,
+		"activeCalls":   s.broker.ActiveCallCount(),
+		"maxTotal":      s.broker.MaxTotalCalls(),
+		"goroutines":    runtime.NumGoroutine(),
+		"memoryBytes":   m.Alloc,
+		"sysBytes":      m.Sys,
+		"gcPauseNs":     m.PauseNs[(m.NumGC+255)%256],
+		"openFds":       fds,
+		"droppedEvents": s.broker.DroppedEvents(),
 	})
 }
 func normalizePhone(p string) string {

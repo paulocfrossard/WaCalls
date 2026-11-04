@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -89,6 +90,7 @@ type Broker struct {
 	maxTotalCalls int
 	totalActive   int
 	draining      bool
+	dropped       atomic.Int64
 
 	SnapshotFn func() []any
 
@@ -151,6 +153,10 @@ func (b *Broker) MaxTotalCalls() int {
 	return b.maxTotalCalls
 }
 
+// DroppedEvents counts SSE events dropped because a subscriber's buffer was
+// full (slow client). Exposed by /api/stats for observability.
+func (b *Broker) DroppedEvents() int64 { return b.dropped.Load() }
+
 func (b *Broker) subscribe(clientID string, sessions []string) *subscriber {
 	s := &subscriber{clientID: clientID, ch: make(chan []byte, 32)}
 	if len(sessions) > 0 {
@@ -211,6 +217,7 @@ func (b *Broker) broadcast(ev any) {
 		select {
 		case s.ch <- data:
 		default:
+			b.dropped.Add(1)
 		}
 	}
 }
@@ -355,6 +362,7 @@ func (b *Broker) broadcastCallList() {
 		select {
 		case s.ch <- payload:
 		default:
+			b.dropped.Add(1)
 		}
 	}
 }
