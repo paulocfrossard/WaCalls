@@ -176,7 +176,7 @@ func (m *CallManager) HandleCallAccept(ctx context.Context, node *waBinary.Node,
 	// Resolve sibling identity outside the lock (may hit the network).
 	var siblings []types.JID
 	for _, dev := range calleeDevices {
-		if !m.sameDeviceJID(dev.String(), peerJid.String()) {
+		if !m.sameDeviceExact(dev.String(), peerJid.String()) {
 			siblings = append(siblings, dev)
 		}
 	}

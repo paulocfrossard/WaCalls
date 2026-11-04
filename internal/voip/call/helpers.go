@@ -87,6 +87,30 @@ func (m *CallManager) sameDeviceJID(a, b string) bool {
 	return wanode.CleanJID(la.String()) == wanode.CleanJID(lb.String())
 }
 
+// sameDeviceExact is the strict sibling comparison: the device numbers must
+// match exactly (device 0 only matches device 0). Used to decide which callee
+// devices are "siblings" that must be told to stop ringing.
+func (m *CallManager) sameDeviceExact(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if a == "" || b == "" || m.sock == nil {
+		return false
+	}
+	ja, ea := types.ParseJID(a)
+	jb, eb := types.ParseJID(b)
+	if ea != nil || eb != nil || ja.Device != jb.Device {
+		return false
+	}
+	ca, cb := wanode.CleanJID(a), wanode.CleanJID(b)
+	if ca == cb {
+		return true
+	}
+	la := m.sock.ResolveLIDForPN(context.Background(), ja.ToNonAD())
+	lb := m.sock.ResolveLIDForPN(context.Background(), jb.ToNonAD())
+	return wanode.CleanJID(la.String()) == wanode.CleanJID(lb.String())
+}
+
 func firstPeerDevice(participants []string, ownBases []string) string {
 	for _, jid := range participants {
 		if !isOwnBase(jid, ownBases) {

@@ -192,6 +192,16 @@ func (m *CallManager) StartCall(ctx context.Context, callID string, peerJid type
 	return nil
 }
 
+// AlreadyAccepted reports whether the current call has moved past the ringing
+// state but is not ended (i.e. a retried accept is a no-op, not a failure that
+// should tear the call down).
+func (m *CallManager) AlreadyAccepted() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := m.currentCall
+	return c != nil && !c.CanAccept() && !c.IsEnded()
+}
+
 func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 	m.mu.Lock()
 	call := m.currentCall

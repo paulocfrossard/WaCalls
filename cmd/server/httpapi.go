@@ -435,8 +435,15 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 	s.broker.broadcastCallList()
 	s.broker.emitIncomingClaimed(sess.id, id, owner)
 	if err := ac.cm.AcceptCall(r.Context(), id); err != nil {
-		// The claim was already broadcast; roll it back so the call does not
-		// stay owned with no media and other operators can retry.
+		// A retried accept on an already-accepted call is a no-op, not a
+		// failure: never tear down a live call.
+		if ac.cm.AlreadyAccepted() {
+			writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": id}})
+			return
+		}
+		// Real failure: stop the manager and roll back the claim so the call
+		// does not stay owned with no media and other operators can retry.
+		_ = ac.cm.EndCall(r.Context(), core.EndCallReasonUserEnded)
 		sess.removeCall(id)
 		s.broker.endCall(id, string(core.EndCallReasonUserEnded))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})

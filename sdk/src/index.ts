@@ -201,6 +201,10 @@ export class WaCallsClient {
   reconnectStream(): void {
     this.#es?.close();
     this.#es = null;
+    if (this.#reconnectTimer !== null) {
+      clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = null;
+    }
     this.#stopped = false;
     this.#reconnectMs = RECONNECT_BASE_MS;
     this.#openEventSource();
