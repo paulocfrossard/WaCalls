@@ -2,6 +2,7 @@ package main
 
 import (
 	"log/slog"
+	"sync"
 	"sync/atomic"
 
 	"wacalls/internal/voip/logbuf"
@@ -27,9 +28,47 @@ type Bridge struct {
 	callID string
 
 	// OnBrowserPCM is invoked with decoded 16 kHz mono PCM captured from the browser mic.
-	OnBrowserPCM func(pcm []float32)
 	// OnTerminalICE fires when the peer connection fails or closes.
-	OnTerminalICE func()
+	// Guarded by cbMu: setBridge detaches them while pion/data-channel
+	// goroutines may still be reading, so both must be swapped under a lock.
+	cbMu          sync.RWMutex
+	onBrowserPCM  func(pcm []float32)
+	onTerminalICE func()
+}
+
+// SetOnBrowserPCM installs the browser-PCM callback.
+func (b *Bridge) SetOnBrowserPCM(fn func(pcm []float32)) {
+	b.cbMu.Lock()
+	b.onBrowserPCM = fn
+	b.cbMu.Unlock()
+}
+
+// SetOnTerminalICE installs the terminal-ICE callback.
+func (b *Bridge) SetOnTerminalICE(fn func()) {
+	b.cbMu.Lock()
+	b.onTerminalICE = fn
+	b.cbMu.Unlock()
+}
+
+// Detach drops both callbacks. Must run before closing a replaced bridge so
+// its ICE/PCM events cannot re-enter the call that now owns the callID.
+func (b *Bridge) Detach() {
+	b.cbMu.Lock()
+	b.onBrowserPCM = nil
+	b.onTerminalICE = nil
+	b.cbMu.Unlock()
+}
+
+func (b *Bridge) browserPCM() func([]float32) {
+	b.cbMu.RLock()
+	defer b.cbMu.RUnlock()
+	return b.onBrowserPCM
+}
+
+func (b *Bridge) terminalICE() func() {
+	b.cbMu.RLock()
+	defer b.cbMu.RUnlock()
+	return b.onTerminalICE
 }
 
 // SetCallID records the call this bridge belongs to for debug-log events.
@@ -49,7 +88,8 @@ func NewBridge(offerSDP string, log *slog.Logger) (*Bridge, string, error) {
 		}
 		br.dc.Store(dc)
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			if cb := br.OnBrowserPCM; cb != nil && len(msg.Data) > 0 {
+			cb := br.browserPCM()
+			if cb != nil && len(msg.Data) > 0 {
 				// Rate-limited 5/s: the mic pushes ~125 messages/s.
 				if logbuf.Enabled() && logbuf.Allow("bridge-uplink:"+br.callID, 5) {
 					logbuf.LogEvent("bridge-uplink", logbuf.LevelDebug, "uplink datachannel message from browser", map[string]any{
@@ -65,8 +105,8 @@ func NewBridge(offerSDP string, log *slog.Logger) (*Bridge, string, error) {
 	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
 		log.Debug("browser ice state", "state", s.String())
 		if s == webrtc.ICEConnectionStateFailed || s == webrtc.ICEConnectionStateClosed {
-			if br.OnTerminalICE != nil {
-				br.OnTerminalICE()
+			if cb := br.terminalICE(); cb != nil {
+				cb()
 			}
 		}
 	})
