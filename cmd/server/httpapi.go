@@ -365,9 +365,14 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 	// Track every assignment: OnBrowserPCM assigned twice for the same call
 	// (two bridges surviving setBridge) is a duplication path.
 	logbuf.LogEvent("webrtc-assign", logbuf.LevelInfo, "OnBrowserPCM assigned", map[string]any{
-		"call_id": callID, "session_id": sess.id,
+		"call_id": callID, "session_id": sess.id, "peer": func() string {
+			if rec, ok := s.broker.getCall(callID); ok {
+				return maskPeer(rec.Peer)
+			}
+			return "unknown"
+		}(),
 	})
-	bridge.OnBrowserPCM = func(pcm []float32) {
+	bridge.SetOnBrowserPCM(func(pcm []float32) {
 		// Rate-limited 5/s: mic pushes ~125 frames/s into this closure.
 		if logbuf.Enabled() && logbuf.Allow("uplink-mic:"+callID, 5) {
 			rms, peak := logbuf.PCMStats(pcm)
@@ -379,10 +384,10 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 			})
 		}
 		ac.cm.FeedCapturedPCM(pcm)
-	}
-	bridge.OnTerminalICE = func() {
-		go sess.terminateCall(callID, core.EndCallReasonUserEnded)
-	}
+	})
+	bridge.SetOnTerminalICE(func() {
+		go sess.terminateCallIfBridge(callID, bridge)
+	})
 	sess.setBridge(callID, bridge)
 	writeJSON(w, http.StatusOK, map[string]string{"sdp_answer": answer})
 }
