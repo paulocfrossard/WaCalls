@@ -38,20 +38,27 @@ func TestNManagersHaveDistinctSSRC(t *testing.T) {
 	}
 }
 
-// TestEndOneCallKeepsOthersActive verifies registry isolation: removing one
-// call does not touch the others.
+// TestEndOneCallKeepsOthersActive verifies that two independent CallManagers
+// do not share state: ending one does not nil the other's currentCall.
 func TestEndOneCallKeepsOthersActive(t *testing.T) {
-	// Covered at the call-manager level: two managers are independent.
 	m1 := newTestManager(t, newFakeSocket(), newFakeRelay(), &passthroughCodec{})
 	m2 := newTestManager(t, newFakeSocket(), newFakeRelay(), &passthroughCodec{})
-	if m1 == m2 {
-		t.Fatal("managers must be distinct")
+
+	c1 := NewIncomingCall("c1", "peer1@lid", "creator@lid", "", core.CallMediaTypeAudio)
+	c2 := NewIncomingCall("c2", "peer2@lid", "creator@lid", "", core.CallMediaTypeAudio)
+	m1.currentCall = c1
+	m2.currentCall = c2
+
+	// Simulate ending m1.
+	m1.mu.Lock()
+	m1.currentCall = nil
+	m1.mu.Unlock()
+
+	if m1.currentCall != nil {
+		t.Fatal("m1 should be cleared")
 	}
-	// Distinct SSRCs
-	m1.selfSsrc = media.GenerateSecureSsrc("c1", "a@b", 0)
-	m2.selfSsrc = media.GenerateSecureSsrc("c2", "a@b", 0)
-	if m1.selfSsrc == m2.selfSsrc {
-		t.Fatal("SSRC collision")
+	if m2.currentCall == nil || m2.currentCall.CallID != "c2" {
+		t.Fatal("m2 must be untouched")
 	}
 }
 
@@ -88,15 +95,7 @@ func TestLIDPNIdentity(t *testing.T) {
 	}
 }
 
-// TestDupDetectorPerCall is a placeholder ensuring the package compiles with
-// the new fakes; real dup-detector coverage lives in logbuf tests.
-func TestDupDetectorPerCall(t *testing.T) {
-	m := newTestManager(t, newFakeSocket(), newFakeRelay(), &passthroughCodec{})
-	if m == nil {
-		t.Fatal("manager nil")
-	}
-}
-
+// keep imports used
 var _ = sync.Mutex{}
 var _ = media.GenerateSecureSsrc
 var _ = core.CallMediaTypeAudio

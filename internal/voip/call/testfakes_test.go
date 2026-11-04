@@ -4,8 +4,8 @@ import (
 	"context"
 	"sync"
 	"testing"
-	"time"
 
+	"wacalls/internal/voip/core"
 	"wacalls/internal/voip/media"
 	"wacalls/internal/voip/transport"
 
@@ -37,6 +37,10 @@ type fakeVoipSocket struct {
 	resolvedLID types.JID
 
 	createdCalls int
+
+	// configurable return values
+	decryptKey []byte
+	decryptErr error
 }
 
 func newFakeSocket() *fakeVoipSocket {
@@ -114,6 +118,16 @@ func (f *fakeVoipSocket) CreateParticipantNodes(ctx context.Context, devices []t
 }
 
 func (f *fakeVoipSocket) DecryptCallKey(ctx context.Context, from types.JID, encChild *waBinary.Node) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.decryptErr != nil {
+		return nil, f.decryptErr
+	}
+	if f.decryptKey != nil {
+		out := make([]byte, len(f.decryptKey))
+		copy(out, f.decryptKey)
+		return out, nil
+	}
 	return media.GenerateCallKey(), nil
 }
 
@@ -220,8 +234,8 @@ func (f *fakeRelayTransport) Deliver(data []byte) {
 	}
 }
 
-// passthroughCodec is a media.Codec that returns samples unchanged, for
-// byte-exact isolation assertions.
+// passthroughCodec is a media.Codec that quantizes float32 to int16 and back,
+// deterministic enough for isolation checks (not byte-exact).
 type passthroughCodec struct{ frame int }
 
 func (p *passthroughCodec) FrameSize() int {
@@ -262,8 +276,9 @@ func newTestManager(t *testing.T, sock *fakeVoipSocket, relay *fakeRelayTranspor
 	return m
 }
 
-// unused guards
-var _ = time.Now
-var _ = context.Background
-var _ = transport.RelayConfig{}
-var _ media.Codec = (*passthroughCodec)(nil)
+// Compile-time interface assertions.
+var (
+	_ core.VoipSocket = (*fakeVoipSocket)(nil)
+	_ RelayTransport  = (*fakeRelayTransport)(nil)
+	_ media.Codec     = (*passthroughCodec)(nil)
+)
