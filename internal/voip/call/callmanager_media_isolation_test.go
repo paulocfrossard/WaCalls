@@ -9,34 +9,6 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-// deviceForm returns the device-suffixed form of a JID ("user:0@server").
-func deviceForm(j types.JID) string {
-	s := j.String()
-	at := -1
-	for i := 0; i < len(s); i++ {
-		if s[i] == '@' {
-			at = i
-			break
-		}
-	}
-	if at < 0 {
-		return s
-	}
-	if i := indexByte(s[:at], ':'); i >= 0 {
-		return s
-	}
-	return s[:at] + ":0" + s[at:]
-}
-
-func indexByte(s string, b byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == b {
-			return i
-		}
-	}
-	return -1
-}
-
 // mediaCall builds a CallManager with a real SRTP session and a peer SSRC so
 // tests can inject real SRTP-protected peer audio.
 func mediaCall(t *testing.T, callID string, callKey []byte, peer types.JID) (*CallManager, *fakeRelayTransport, *int) {
@@ -46,8 +18,8 @@ func mediaCall(t *testing.T, callID string, callKey []byte, peer types.JID) (*Ca
 	relay.connected = true
 	m := NewCallManagerWithDeps(Deps{Sock: sock, Relay: relay, Codec: &passthroughCodec{}})
 
-	ourDevice := deviceForm(sock.OwnLID())
-	peerDevice := deviceForm(peer)
+	ourDevice := ensureDeviceJid(sock.OwnLID().String())
+	peerDevice := ensureDeviceJid(peer.String())
 
 	c := NewIncomingCall(callID, peer.String(), peer.String(), "", core.CallMediaTypeAudio)
 	c.EncryptionKey = callKey
@@ -56,7 +28,9 @@ func mediaCall(t *testing.T, callID string, callKey []byte, peer types.JID) (*Ca
 	m.selfSsrc = media.GenerateSecureSsrc(callID, ourDevice, 0)
 	m.peerSsrcs = []uint32{media.GenerateSecureSsrc(callID, peerDevice, 0)}
 	m.rtpSession = media.NewWhatsAppOpusSession(m.selfSsrc)
+	m.mu.Lock()
 	m.initSrtpKeysLocked()
+	m.mu.Unlock()
 	if m.srtpSession == nil {
 		t.Fatal("srtp session not derived")
 	}
@@ -68,8 +42,8 @@ func mediaCall(t *testing.T, callID string, callKey []byte, peer types.JID) (*Ca
 // peerPacket builds a real SRTP packet as the peer would send it to m.
 func peerPacket(t *testing.T, m *CallManager, callKey []byte, peer types.JID, payload []byte) []byte {
 	t.Helper()
-	peerDevice := deviceForm(peer)
-	ourDevice := deviceForm(m.sock.OwnLID())
+	peerDevice := ensureDeviceJid(peer.String())
+	ourDevice := ensureDeviceJid(m.sock.OwnLID().String())
 	peerSend, err := media.DerivePerJidSrtpKey(callKey, peerDevice)
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +53,7 @@ func peerPacket(t *testing.T, m *CallManager, callKey []byte, peer types.JID, pa
 		t.Fatal(err)
 	}
 	// Peer's send == manager's recv; the other direction is irrelevant here.
-	sess, err := media.NewSrtpSession(peerSend, ourRecv, core.SRTPSendAuthTagLen, core.SRTPRecvAuthTagLen)
+	sess, err := media.NewSrtpSession(peerSend, ourRecv, core.SRTPRecvAuthTagLen, core.SRTPSendAuthTagLen)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,6 +117,14 @@ func TestMediaUplinkIsolationTwoCalls(t *testing.T) {
 
 	if len(relayA.broadcasts) == 0 {
 		t.Fatal("call A should broadcast uplink audio")
+	}
+	if len(relayA.broadcasts[0]) < 12 {
+		t.Fatalf("uplink broadcast too short to be RTP/SRTP: %d bytes", len(relayA.broadcasts[0]))
+	}
+	// The broadcast must carry call A's own SSRC in the RTP header.
+	gotSsrc := uint32(relayA.broadcasts[0][8])<<24 | uint32(relayA.broadcasts[0][9])<<16 | uint32(relayA.broadcasts[0][10])<<8 | uint32(relayA.broadcasts[0][11])
+	if gotSsrc != mA.selfSsrc {
+		t.Fatalf("uplink SSRC=%x want %x", gotSsrc, mA.selfSsrc)
 	}
 	if len(relayB.broadcasts) != 0 {
 		t.Fatalf("call B must not broadcast call A uplink, got %d", len(relayB.broadcasts))
