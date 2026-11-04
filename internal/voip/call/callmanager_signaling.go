@@ -16,6 +16,13 @@ func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, 
 	if info == nil {
 		return
 	}
+	m.mu.Lock()
+	if m.currentCall != nil && !m.currentCall.IsEnded() {
+		m.mu.Unlock()
+		m.log.Warn("HandleCallOffer ignored: call already in progress", "call_id", info.CallID)
+		return
+	}
+	m.mu.Unlock()
 	callID := info.CallID
 	creator := wanode.AttrString(info.InnerNode.Attrs, "call-creator")
 	if creator == "" {
@@ -97,6 +104,10 @@ func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, 
 func (m *CallManager) HandleCallAccept(ctx context.Context, node *waBinary.Node, peerJid types.JID) {
 	m.mu.Lock()
 	call := m.currentCall
+	if call != nil && call.IsEnded() {
+		m.mu.Unlock()
+		return
+	}
 	m.mu.Unlock()
 	if call == nil {
 		return

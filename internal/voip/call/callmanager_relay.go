@@ -122,6 +122,8 @@ func (m *CallManager) cleanupMedia() {
 	m.encodeBufPos = 0
 	m.seenRTP = nil
 	m.seenRTPPrune = time.Time{}
+	m.acceptedByJid = ""
+	m.currentCall = nil
 	m.mu.Unlock()
 
 	m.relay.Cleanup()
