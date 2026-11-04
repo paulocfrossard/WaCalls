@@ -8,12 +8,12 @@ import type { HistoryRow } from "@/types/history";
 
 type State = {
   calls: CallSummary[];
-  incoming: IncomingPayload | null;
+  incoming: IncomingPayload[];
 };
 
 export const useCalls = create<State>(() => ({
   calls: [],
-  incoming: null,
+  incoming: [],
 }));
 
 let wired = false;
@@ -25,15 +25,16 @@ export const ensureCallsWired = (): void => {
   // fanned out to per-row call:status events by the SDK as well).
   sdkClient.on("call:incoming", (p) => {
     useCalls.setState((s) => {
-      // offeredAt from the broker frame when present: a re-sent offer (SSE
-      // reconnect replay) keeps the original timestamp AND the same state
-      // object, so the ring loop isn't restarted by a duplicate frame.
       const offeredAt = p.offeredAt ?? Date.now();
-      const cur = s.incoming;
-      if (cur && cur.callId === p.callId && cur.offeredAt === offeredAt) return s;
-      return {
-        incoming: { sessionId: p.sessionId, callId: p.callId, peer: p.peer, offeredAt },
-      };
+      // Dedupe by (callId, offeredAt): a re-sent offer (SSE reconnect replay)
+      // keeps the original timestamp AND the same queue entry, so the ring
+      // loop isn't restarted by a duplicate frame.
+      if (s.incoming.some((c) => c.callId === p.callId && c.offeredAt === offeredAt)) return s;
+      // Drop any stale entry for the same callId (re-offer with new timestamp).
+      const next = s.incoming.filter((c) => c.callId !== p.callId);
+      next.push({ sessionId: p.sessionId, callId: p.callId, peer: p.peer, offeredAt });
+      next.sort((a, b) => a.offeredAt - b.offeredAt);
+      return { incoming: next };
     });
   });
 
@@ -80,7 +81,7 @@ export const ensureCallsWired = (): void => {
     const ended = useCalls.getState().calls.find((c) => c.callId === p.callId);
     useCalls.setState((s) => ({
       calls: s.calls.filter((c) => c.callId !== p.callId),
-      incoming: s.incoming?.callId === p.callId ? null : s.incoming,
+      incoming: s.incoming.filter((c) => c.callId !== p.callId),
     }));
     if (ended) {
       queryClient.setQueryData<HistoryRow[]>(["history", p.sessionId], (rows) => {
@@ -110,11 +111,11 @@ export const ensureCallsWired = (): void => {
     if (ev.type === "call-list") {
       useCalls.setState({ calls: ev.calls });
     } else if (ev.type === "incoming-claimed") {
-      useCalls.setState((s) => (s.incoming?.callId === ev.id ? { incoming: null } : s));
+      useCalls.setState((s) => ({ incoming: s.incoming.filter((c) => c.callId !== ev.id) }));
     }
   });
 };
 
 export const isMine = (call: CallSummary): boolean => call.owner === getClientId();
 
-export const clearIncoming = (): void => useCalls.setState({ incoming: null });
+export const clearIncoming = (): void => useCalls.setState({ incoming: [] });

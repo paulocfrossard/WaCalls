@@ -48,7 +48,8 @@ const startRingLoop = (): RingHandle | null => {
 };
 
 export const IncomingCallModal = () => {
-  const incoming = useCalls((s) => s.incoming);
+  const incomingList = useCalls((s) => s.incoming);
+  const incoming = incomingList.length > 0 ? incomingList[0] : null;
   const accept = useAcceptCall();
   const reject = useRejectCall();
   const busy = accept.isPending || reject.isPending;
