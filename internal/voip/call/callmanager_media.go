@@ -201,14 +201,6 @@ func (m *CallManager) onRelayData(data []byte) {
 		})
 		return
 	}
-	if !m.actualPeerSet {
-		m.actualPeerSet = true
-		if !containsSsrc(m.peerSsrcs, ssrc) {
-			m.peerSsrcs = []uint32{ssrc}
-			m.relay.SetSubscriptionSsrc(ssrc)
-			go m.relay.ResendSubscriptions()
-		}
-	}
 	srtp := m.srtpSession
 	codec := m.codec
 	callID := m.callIDLocked()
@@ -229,6 +221,18 @@ func (m *CallManager) onRelayData(data []byte) {
 	if len(pkt.Payload) == 0 {
 		return
 	}
+	// Subscription bootstrap only after the packet authenticated: RTP-shaped bytes
+	// with a spoofed SSRC must never redirect the peer subscription.
+	m.mu.Lock()
+	if !m.actualPeerSet {
+		m.actualPeerSet = true
+		if !containsSsrc(m.peerSsrcs, ssrc) {
+			m.peerSsrcs = []uint32{ssrc}
+			m.relay.SetSubscriptionSsrc(ssrc)
+			go m.relay.ResendSubscriptions()
+		}
+	}
+	m.mu.Unlock()
 	pcm, err := codec.Decode(pkt.Payload)
 	if err != nil {
 		if logbuf.Enabled() && logbuf.Allow("decoder:"+callID, 5) {
