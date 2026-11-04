@@ -162,6 +162,7 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 	// above and here, keep the existing call instead of overwriting it.
 	if !s.reg.addIfAbsent(callID, &activeCall{cm: cm}) {
 		s.logDuplicateOffer(callID, evt.From)
+		s.mgr.broker.releaseAdmission()
 		return
 	}
 	cm.HandleCallOffer(ctx, node, evt.From)
