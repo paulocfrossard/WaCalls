@@ -27,18 +27,34 @@ func ensureDeviceJid(jid string) string {
 	return strings.Replace(jid, "@", ":0@", 1)
 }
 
-func findOurDevice(participants []string, ourBase, fallback string) string {
-	for _, jid := range participants {
-		if wanode.CleanJID(jid) == ourBase && strings.Contains(jid, ":") {
-			return jid
+// isOwnBase reports whether jid (device or not) resolves to one of our own
+// identities (LID and/or PN).
+func isOwnBase(jid string, ownBases []string) bool {
+	clean := wanode.CleanJID(jid)
+	for _, b := range ownBases {
+		if b != "" && clean == b {
+			return true
+		}
+	}
+	return false
+}
+
+func findOurDevice(participants []string, ownBases []string, fallback string) string {
+	// Prefer the device form of the first identity (ownBaseJIDs lists the
+	// credential JID first), then any other own identity.
+	for _, base := range ownBases {
+		for _, jid := range participants {
+			if strings.Contains(jid, ":") && wanode.CleanJID(jid) == base {
+				return jid
+			}
 		}
 	}
 	return fallback
 }
 
-func firstPeerDevice(participants []string, ourBase string) string {
+func firstPeerDevice(participants []string, ownBases []string) string {
 	for _, jid := range participants {
-		if wanode.CleanJID(jid) != ourBase {
+		if !isOwnBase(jid, ownBases) {
 			return jid
 		}
 	}
