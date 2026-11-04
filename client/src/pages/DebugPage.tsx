@@ -119,8 +119,15 @@ const parsePayload = (
 const matchesSource = (filter: SourceFilter, source: string): boolean => {
   if (filter === "all") return true;
   if (filter === "client") return source.startsWith("client:");
-  // `uplink` also matches the local `client:uplink` counterpart.
-  return source === filter || source === `client:${filter}`;
+  // Dash-boundary prefix: `uplink` -> uplink-mic/uplink-frame; `bridge` ->
+  // bridge-uplink/bridge-downlink; `session` -> session-audio; `downlink` ->
+  // downlink-decode. Keeps `client:` counterparts via the client: prefix.
+  return (
+    source === filter ||
+    source.startsWith(`${filter}-`) ||
+    source === `client:${filter}` ||
+    source.startsWith(`client:${filter}-`)
+  );
 };
 
 const stringifyFields = (fields: Record<string, unknown>): string => {
@@ -129,6 +136,15 @@ const stringifyFields = (fields: Record<string, unknown>): string => {
   } catch {
     return "[unserializable]";
   }
+};
+
+// Server events use snake_case, client events camelCase. Prefer a non-empty
+// string from either so a stray `call_id: ""` cannot shadow a valid `callId`.
+const callIdOf = (fields: Record<string, unknown>): string | undefined => {
+  const snake = fields.call_id;
+  if (typeof snake === "string" && snake) return snake;
+  const camel = fields.callId;
+  return typeof camel === "string" && camel ? camel : undefined;
 };
 
 /* -------------------------------------------------------------------------- *
@@ -239,6 +255,7 @@ export const DebugPage = () => {
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [levelFilter, setLevelFilter] = useState<LevelFilter>("all");
   const [query, setQuery] = useState("");
+  const [callIdFilter, setCallIdFilter] = useState("");
   const [now, setNow] = useState(() => Date.now());
 
   const localEvents = useSyncExternalStore(subscribeDebugLog, getDebugLogSnapshot, getDebugLogSnapshot);
@@ -370,16 +387,33 @@ export const DebugPage = () => {
     return all;
   }, [localEvents, serverEvents]);
 
+  const callIdOptions = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const ev of merged) {
+      const f = ev.fields;
+      if (!f) continue;
+      const v = callIdOf(f);
+      if (v) seen.set(v.toLowerCase(), v);
+    }
+    return [...seen.values()].sort();
+  }, [merged]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return merged.filter((ev) => {
       if (!matchesSource(sourceFilter, ev.source)) return false;
       if (LEVEL_RANK[ev.level] < activeLevel.min) return false;
+      const cid = callIdFilter.trim().toLowerCase();
+      if (cid) {
+        const f = ev.fields;
+        const row = f ? callIdOf(f) : undefined;
+        if (!row || !row.toLowerCase().includes(cid)) return false;
+      }
       if (!q) return true;
       const haystack = `${ev.source} ${ev.msg} ${ev.fields ? stringifyFields(ev.fields) : ""}`.toLowerCase();
       return haystack.includes(q);
     });
-  }, [merged, sourceFilter, activeLevel, query]);
+  }, [merged, sourceFilter, activeLevel, query, callIdFilter]);
 
   const rows = useMemo(() => {
     const visible =
@@ -468,6 +502,25 @@ export const DebugPage = () => {
           <Chip active={sourceFilter === "client"} onClick={() => setSourceFilter("client")}>
             client:*
           </Chip>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1.5">
+          <label htmlFor="debug-log-callid" className="mr-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Call ID
+          </label>
+          <Input
+            id="debug-log-callid"
+            list="debug-call-ids"
+            value={callIdFilter}
+            onChange={(e) => setCallIdFilter(e.target.value)}
+            placeholder="call_id / callId…"
+            className="h-8 w-full max-w-64 text-xs sm:w-64"
+          />
+          <datalist id="debug-call-ids">
+            {callIdOptions.map((id) => (
+              <option key={id} value={id} />
+            ))}
+          </datalist>
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
