@@ -348,6 +348,15 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
 		return
 	}
+	owner := clientID(r)
+	if other := s.broker.ownerActiveCall(owner); other != "" && other != callID {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call"})
+		return
+	}
+	if !s.broker.setOwner(callID, owner) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
+		return
+	}
 	var body struct {
 		SDPOffer string `json:"sdp_offer"`
 	}
@@ -418,6 +427,11 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 
 func (s *server) doReject(sess *Session, w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	owner := clientID(r)
+	if !s.broker.isOwnerOrUnclaimed(id, owner) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
+		return
+	}
 	if ac, ok := sess.reg.get(id); ok {
 		_ = ac.cm.RejectCall(r.Context(), id, core.EndCallReasonDeclined)
 	}
@@ -428,6 +442,11 @@ func (s *server) doReject(sess *Session, w http.ResponseWriter, r *http.Request)
 
 func (s *server) doEndCall(sess *Session, w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	owner := clientID(r)
+	if !s.broker.isOwnerOrUnclaimed(id, owner) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
+		return
+	}
 	if ac, ok := sess.reg.get(id); ok {
 		_ = ac.cm.EndCall(r.Context(), core.EndCallReasonUserEnded)
 	}
