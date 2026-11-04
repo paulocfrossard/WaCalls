@@ -25,6 +25,13 @@ if (typeof window !== "undefined") {
     if (e.key !== null && e.key !== BASE_URL_STORAGE_KEY) return;
     reconfigureSdk(resolveBaseUrl());
   });
+
+  // End the active call server-side when the tab is closed/navigated away,
+  // instead of waiting for the ICE timeout. disconnect() fires a keepalive
+  // DELETE for the owned call before local teardown.
+  window.addEventListener("pagehide", () => {
+    sdkClient.disconnect();
+  });
 }
 
 // Keep the SDK's device selection in sync with the devices store: micId applies

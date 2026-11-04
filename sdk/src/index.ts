@@ -609,6 +609,8 @@ export class WaCallsClient {
     const res = await fetch(url, {
       method,
       headers: this.#headers(),
+      // keepalive lets the hangup DELETE complete when the page is unloading.
+      keepalive: true,
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     if (!res.ok) {

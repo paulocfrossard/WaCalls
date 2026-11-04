@@ -113,7 +113,15 @@ export const ensureCallsWired = (): void => {
   sdkClient.on("broker:event", (raw) => {
     const ev = asBrokerEvent(raw);
     if (ev.type === "call-list") {
-      useCalls.setState({ calls: ev.calls });
+      useCalls.setState((s) => {
+        // The snapshot is already owner-scoped: a call claimed by another
+        // operator drops out. Prune the incoming queue so a non-owner stops
+        // ringing once someone else claims the call.
+        const ids = new Set(ev.calls.map((c) => c.callId));
+        const incoming = s.incoming.filter((c) => ids.has(c.callId));
+        if (incoming.length === s.incoming.length) return { calls: ev.calls };
+        return { calls: ev.calls, incoming };
+      });
     } else if (ev.type === "incoming-claimed") {
       useCalls.setState((s) => {
         if (!s.incoming.some((c) => c.callId === ev.id)) return s;

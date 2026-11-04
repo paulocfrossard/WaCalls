@@ -142,12 +142,15 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 		s.logDuplicateOffer(callID, evt.From)
 		return
 	}
+	var callKey []byte
 	if info := signaling.ExtractNodeInfo(node); info != nil {
-		if _, err := signaling.DecryptCallKeyInNode(ctx, wa.NewSocket(s.client), info.InnerNode, evt.From); err != nil {
+		key, err := signaling.DecryptCallKeyInNode(ctx, wa.NewSocket(s.client), info.InnerNode, evt.From)
+		if err != nil {
 			s.log.Error("offer call key undecryptable; rejecting call", "call_id", callID, "peer", evt.From.String(), "err", err)
 			s.rejectOffer(ctx, node, evt.From)
 			return
 		}
+		callKey = key
 	}
 	if max := s.mgr.maxCalls; max > 0 && s.reg.count() >= max {
 		s.rejectOffer(ctx, node, evt.From)
@@ -165,8 +168,9 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 		s.mgr.broker.releaseAdmission()
 		return
 	}
-	if err := cm.HandleCallOffer(ctx, node, evt.From); err != nil {
+	if err := cm.HandleCallOffer(ctx, node, evt.From, callKey); err != nil {
 		s.log.Warn("incoming offer rejected", "call_id", callID, "err", err)
+		s.rejectOffer(ctx, node, evt.From)
 		s.removeCall(callID)
 	}
 }

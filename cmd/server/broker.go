@@ -69,6 +69,11 @@ func (s *subscriber) wantsEvent(ev any) bool {
 	if sid, ok := m["sessionId"].(string); ok && sid != "" && !s.wantsSession(sid) {
 		return false
 	}
+	// incoming-claimed is a global claim notice: every operator on the session
+	// must clear its ringing entry, so it is exempt from the owner filter.
+	if t, ok := m["type"].(string); ok && t == "incoming-claimed" {
+		return true
+	}
 	// Owner-bearing events are only delivered to the owning client (empty
 	// clientID = anonymous LAN client, which sees everything by design).
 	if s.clientID != "" {

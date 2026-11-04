@@ -173,6 +173,10 @@ func (m *CallManager) StartCall(ctx context.Context, callID string, peerJid type
 	}
 
 	m.mu.Lock()
+	if m.currentCall == nil || m.currentCall.IsEnded() {
+		m.mu.Unlock()
+		return &CallError{"call ended before offer was sent"}
+	}
 	m.calleeDevices = calleeDevices
 	_ = m.currentCall.ApplyTransition(Transition{Type: TransitionOfferSent})
 	m.emitState()

@@ -11,7 +11,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, peerJid types.JID) error {
+func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, peerJid types.JID, callKey []byte) error {
 	info := signaling.ExtractNodeInfo(node)
 	if info == nil {
 		return &CallError{"offer without call info"}
@@ -30,10 +30,8 @@ func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, 
 	}
 	isVideo := hasChildTag(info.InnerNode, "video")
 
-	callKey, err := signaling.DecryptCallKeyInNode(ctx, m.sock, info.InnerNode, peerJid)
-	if err != nil {
-		m.log.Error("offer decrypt call key", "err", err)
-		return &CallError{"offer call key undecryptable"}
+	if callKey == nil {
+		return &CallError{"offer call key missing"}
 	}
 	relays := signaling.ExtractRelayEndpoints(info.InnerNode)
 	var structured *signaling.ParsedRelayAck
@@ -142,11 +140,16 @@ func (m *CallManager) HandleCallAccept(ctx context.Context, node *waBinary.Node,
 	}
 
 	m.mu.Lock()
-	// Re-check under the lock: a concurrent accept may have won between the
-	// early guard above and here.
+	// Re-check under the lock: a concurrent accept may have won, or cleanup
+	// may have ended/cleared this call, between the guard above and here.
 	if m.acceptedByJid != "" {
 		m.mu.Unlock()
 		m.log.Info("duplicate accept ignored", "accepted_by", m.acceptedByJid, "from", peerJid.String())
+		return
+	}
+	if m.currentCall != call || call.IsEnded() {
+		m.mu.Unlock()
+		m.log.Info("accept ignored: call is gone or ended", "call_id", call.CallID)
 		return
 	}
 	_ = call.ApplyTransition(Transition{Type: TransitionRemoteAccepted})
@@ -162,7 +165,7 @@ func (m *CallManager) HandleCallAccept(ctx context.Context, node *waBinary.Node,
 	relayData := call.RelayData
 	var siblings []types.JID
 	for _, dev := range m.calleeDevices {
-		if dev.String() != peerJid.String() {
+		if !m.samePeerJID(dev.String(), peerJid.String()) {
 			siblings = append(siblings, dev)
 		}
 	}
@@ -324,7 +327,7 @@ func (m *CallManager) HandleCallTerminate(node *waBinary.Node) {
 	// kept ringing eventually times out and sends its own reject/terminate, which
 	// must not tear down the live call.
 	sender := wanode.AttrString(node.Attrs, "from")
-	if m.acceptedByJid != "" && sender != "" && sender != m.acceptedByJid && !call.IsEnded() {
+	if m.acceptedByJid != "" && sender != "" && !m.samePeerJID(sender, m.acceptedByJid) && !call.IsEnded() {
 		m.mu.Unlock()
 		m.log.Info("terminate from non-answering device ignored",
 			"call_id", call.CallID, "from", sender, "accepted_by", m.acceptedByJid)

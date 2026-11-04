@@ -1,11 +1,13 @@
 package call
 
 import (
+	"context"
 	"strings"
 	"wacalls/internal/voip/core"
 	"wacalls/internal/voip/wanode"
 
 	waBinary "go.mau.fi/whatsmeow/binary"
+	"go.mau.fi/whatsmeow/types"
 )
 
 func hasChildTag(n *waBinary.Node, tag string) bool {
@@ -50,6 +52,27 @@ func findOurDevice(participants []string, ownBases []string, fallback string) st
 		}
 	}
 	return fallback
+}
+
+// samePeerJID reports whether two JID strings refer to the same peer, tolerating
+// device suffixes and LID/PN spelling differences. Returns true on uncertainty
+// (empty or unparseable) so a legitimate terminate is never dropped.
+func (m *CallManager) samePeerJID(a, b string) bool {
+	if a == "" || b == "" || m.sock == nil {
+		return true
+	}
+	ca, cb := wanode.CleanJID(a), wanode.CleanJID(b)
+	if ca == cb {
+		return true
+	}
+	ja, ea := types.ParseJID(ca)
+	jb, eb := types.ParseJID(cb)
+	if ea != nil || eb != nil {
+		return true
+	}
+	la := m.sock.ResolveLIDForPN(context.Background(), ja)
+	lb := m.sock.ResolveLIDForPN(context.Background(), jb)
+	return wanode.CleanJID(la.String()) == wanode.CleanJID(lb.String())
 }
 
 func firstPeerDevice(participants []string, ownBases []string) string {
