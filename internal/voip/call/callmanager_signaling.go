@@ -11,16 +11,16 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, peerJid types.JID) {
+func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, peerJid types.JID) error {
 	info := signaling.ExtractNodeInfo(node)
 	if info == nil {
-		return
+		return &CallError{"offer without call info"}
 	}
 	m.mu.Lock()
 	if m.currentCall != nil && !m.currentCall.IsEnded() {
 		m.mu.Unlock()
 		m.log.Warn("HandleCallOffer ignored: call already in progress", "call_id", info.CallID)
-		return
+		return &CallError{"call already in progress"}
 	}
 	m.mu.Unlock()
 	callID := info.CallID
@@ -33,6 +33,7 @@ func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, 
 	callKey, err := signaling.DecryptCallKeyInNode(ctx, m.sock, info.InnerNode, peerJid)
 	if err != nil {
 		m.log.Error("offer decrypt call key", "err", err)
+		return &CallError{"offer call key undecryptable"}
 	}
 	relays := signaling.ExtractRelayEndpoints(info.InnerNode)
 	var structured *signaling.ParsedRelayAck
@@ -60,7 +61,7 @@ func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, 
 	if m.currentCall != nil && !m.currentCall.IsEnded() {
 		m.mu.Unlock()
 		m.log.Warn("HandleCallOffer ignored: call already in progress", "call_id", callID)
-		return
+		return &CallError{"call already in progress"}
 	}
 	call := NewIncomingCall(callID, peerJid.String(), creator, "", mediaType)
 	if callKey != nil {
@@ -104,6 +105,7 @@ func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, 
 	m.emitState()
 	m.mu.Unlock()
 	m.log.Info("incoming call", "call_id", callID, "peer", peerJid.String(), "video", isVideo, "relays", len(relays))
+	return nil
 }
 
 func (m *CallManager) HandleCallAccept(ctx context.Context, node *waBinary.Node, peerJid types.JID) {

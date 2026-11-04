@@ -165,7 +165,10 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 		s.mgr.broker.releaseAdmission()
 		return
 	}
-	cm.HandleCallOffer(ctx, node, evt.From)
+	if err := cm.HandleCallOffer(ctx, node, evt.From); err != nil {
+		s.log.Warn("incoming offer rejected", "call_id", callID, "err", err)
+		s.removeCall(callID)
+	}
 }
 
 // logDuplicateOffer records a re-entrant offer that must not replace a live
