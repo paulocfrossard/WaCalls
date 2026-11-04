@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,9 +49,14 @@ func newSession(mgr *SessionManager, id, name string, client *whatsmeow.Client) 
 	return s
 }
 
-func (s *Session) createCall(callID string) *call.CallManager {
+func (s *Session) newCall(callID string) *call.CallManager {
 	cm := call.NewCallManager(wa.NewSocket(s.client), s.log)
 	s.wireCall(cm, callID)
+	return cm
+}
+
+func (s *Session) createCall(callID string) *call.CallManager {
+	cm := s.newCall(callID)
 	s.reg.add(callID, &activeCall{cm: cm})
 	return cm
 }
@@ -89,8 +95,8 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		s.mgr.broker.endCall(c.CallID, string(c.StateData.EndReason))
 	}
 	cm.OnPeerAudio = func(pcm16 []float32) {
-		ac, ok := s.reg.get(callID)
-		if !ok || ac.bridge == nil {
+		owner, br, ok := s.reg.getWithBridge(callID)
+		if !ok || owner != cm || br == nil {
 			return
 		}
 		// Rate-limited 5/s: two callbacks registered for this call double
@@ -101,7 +107,7 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 				"samples": len(pcm16),
 			})
 		}
-		_ = ac.bridge.WritePCM(pcm16)
+		_ = br.WritePCM(pcm16)
 	}
 }
 
@@ -129,12 +135,31 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 	if callID == "" {
 		return
 	}
+	if _, ok := s.reg.get(callID); ok {
+		s.logDuplicateOffer(callID, evt.From)
+		return
+	}
 	if max := s.mgr.maxCalls; max > 0 && s.reg.count() >= max {
 		s.rejectOffer(ctx, node, evt.From)
 		return
 	}
-	cm := s.createCall(callID)
+	cm := s.newCall(callID)
+	// Insert atomically: if another delivery won the race between the check
+	// above and here, keep the existing call instead of overwriting it.
+	if !s.reg.addIfAbsent(callID, &activeCall{cm: cm}) {
+		s.logDuplicateOffer(callID, evt.From)
+		return
+	}
 	cm.HandleCallOffer(ctx, node, evt.From)
+}
+
+// logDuplicateOffer records a re-entrant offer that must not replace a live
+// call. createCall would otherwise orphan the live bridge and leak a second
+// CallManager whose OnPeerAudio still writes PCM to the registry bridge.
+func (s *Session) logDuplicateOffer(callID string, from types.JID) {
+	logbuf.LogEvent("session", logbuf.LevelWarn, "duplicate call ignored, existing call kept", map[string]any{
+		"call_id": callID, "session_id": s.id, "peer": maskPeer(from.String()),
+	})
 }
 
 func (s *Session) rejectOffer(ctx context.Context, node *waBinary.Node, from types.JID) {
@@ -261,11 +286,19 @@ func (s *Session) setBridge(callID string, b *Bridge) {
 		logbuf.LogEvent("bridge", logbuf.LevelWarn, "setBridge: bridge replaced, old bridge closed", map[string]any{
 			"call_id": callID, "session_id": s.id, "replaced": true,
 		})
+		// Detach first: closing the old peer can fire ICE Failed/Closed,
+		// and its OnTerminalICE would otherwise terminate the LIVE call,
+		// while OnBrowserPCM would keep feeding the live CallManager.
+		oldB.Detach()
 		oldB.Close()
 		return
 	}
+	peer := "unknown"
+	if rec, ok := s.mgr.broker.getCall(callID); ok {
+		peer = maskPeer(rec.Peer)
+	}
 	logbuf.LogEvent("bridge", logbuf.LevelInfo, "setBridge: bridge attached", map[string]any{
-		"call_id": callID, "session_id": s.id,
+		"call_id": callID, "session_id": s.id, "peer": peer,
 	})
 }
 
@@ -275,6 +308,7 @@ func (s *Session) removeCall(callID string) {
 		return
 	}
 	if ac.bridge != nil {
+		ac.bridge.Detach()
 		ac.bridge.Close()
 	}
 }
@@ -287,10 +321,24 @@ func (s *Session) terminateCall(callID string, reason core.EndCallReason) {
 	_ = ac.cm.EndCall(context.Background(), reason)
 }
 
+// terminateCallIfBridge ends callID only when b still owns it, so an in-flight
+// ICE callback from a replaced/closed bridge cannot kill the live call.
+func (s *Session) terminateCallIfBridge(callID string, b *Bridge) {
+	if !s.reg.bridgeIs(callID, b) {
+		return
+	}
+	ac, ok := s.reg.get(callID)
+	if !ok {
+		return
+	}
+	_ = ac.cm.EndCall(context.Background(), core.EndCallReasonUserEnded)
+}
+
 func (s *Session) teardownAllCalls() {
 	for _, ac := range s.reg.drain() {
 		_ = ac.cm.EndCall(context.Background(), core.EndCallReasonUserEnded)
 		if ac.bridge != nil {
+			ac.bridge.Detach()
 			ac.bridge.Close()
 		}
 	}
@@ -319,4 +367,24 @@ func mapStatus(state core.CallState) CallStatus {
 	default:
 		return StatusRinging
 	}
+}
+
+// maskPeer keeps only the last 4 characters of the user part of a JID/phone,
+// so debug logs stay diagnostic without leaking full numbers (LAN-trust endpoint).
+func maskPeer(p string) string {
+	at := strings.IndexByte(p, '@')
+	user := p
+	domain := ""
+	if at >= 0 {
+		user = p[:at]
+		domain = p[at:]
+	}
+	if c := strings.IndexByte(user, ':'); c >= 0 {
+		user = user[:c]
+	}
+	runes := []rune(user)
+	if len(runes) <= 4 {
+		return "****" + domain
+	}
+	return strings.Repeat("*", len(runes)-4) + string(runes[len(runes)-4:]) + domain
 }
