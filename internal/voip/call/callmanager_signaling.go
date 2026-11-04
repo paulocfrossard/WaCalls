@@ -226,16 +226,19 @@ func (m *CallManager) HandleCallAck(ctx context.Context, node *waBinary.Node) {
 		HbhKey:          parsed.HbhKey,
 	}
 
-	ourBase := wanode.CleanJID(m.ownCredJid())
+	ourBases := m.ownBaseJIDs()
 	if len(parsed.ParticipantJids) > 0 {
-		ourDeviceJid := ensureDeviceJid(findOurDevice(parsed.ParticipantJids, ourBase, m.ownCredJid()))
+		ourDeviceJid := ensureDeviceJid(findOurDevice(parsed.ParticipantJids, ourBases, m.ownCredJid()))
 		newSelf := media.GenerateSecureSsrc(call.CallID, ourDeviceJid, 0)
 		if newSelf != m.selfSsrc {
 			m.selfSsrc = newSelf
 			m.rtpSession = media.NewWhatsAppOpusSession(newSelf)
 		}
-		if peer := firstPeerDevice(parsed.ParticipantJids, ourBase); peer != "" {
+		if peer := firstPeerDevice(parsed.ParticipantJids, ourBases); peer != "" {
 			m.peerSsrcs = []uint32{media.GenerateSecureSsrc(call.CallID, ensureDeviceJid(peer), 0)}
+		} else {
+			m.actualPeerSet = false
+			m.log.Warn("participant list has no peer device; waiting for first RTP packet to learn SSRC", "call_id", call.CallID)
 		}
 		if call.EncryptionKey != nil {
 			m.initSrtpKeysLocked()
