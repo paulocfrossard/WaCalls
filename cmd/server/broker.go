@@ -138,6 +138,13 @@ func (b *Broker) SetDraining(v bool) {
 	b.draining = v
 }
 
+// Draining reports whether the broker is shutting down and refusing new calls.
+func (b *Broker) Draining() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.draining
+}
+
 func (b *Broker) releaseAdmission() {
 	b.mu.Lock()
 	defer b.mu.Unlock()

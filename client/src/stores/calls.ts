@@ -80,12 +80,13 @@ export const ensureCallsWired = (): void => {
     const endedAt = p.endedAt ?? Date.now();
     const ended = useCalls.getState().calls.find((c) => c.callId === p.callId);
     useCalls.setState((s) => {
-      const calls = s.calls.filter((c) => c.callId !== p.callId);
-      const incoming = s.incoming.some((c) => c.callId === p.callId)
-        ? s.incoming.filter((c) => c.callId !== p.callId)
-        : s.incoming;
-      if (calls === s.calls && incoming === s.incoming) return s;
-      return { calls, incoming };
+      const hadCall = s.calls.some((c) => c.callId === p.callId);
+      const hadIncoming = s.incoming.some((c) => c.callId === p.callId);
+      if (!hadCall && !hadIncoming) return s;
+      return {
+        calls: hadCall ? s.calls.filter((c) => c.callId !== p.callId) : s.calls,
+        incoming: hadIncoming ? s.incoming.filter((c) => c.callId !== p.callId) : s.incoming,
+      };
     });
     if (ended) {
       queryClient.setQueryData<HistoryRow[]>(["history", p.sessionId], (rows) => {

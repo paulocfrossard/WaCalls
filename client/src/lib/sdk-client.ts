@@ -35,6 +35,11 @@ if (typeof window !== "undefined") {
     if (e.persisted) return;
     sdkClient.disconnect();
   });
+  window.addEventListener("pageshow", (e) => {
+    // Restored from bfcache: reconnect the SSE stream that pagehide may have
+    // stopped (only when this was a persisted restore).
+    if (e.persisted) sdkClient.connect();
+  });
 }
 
 // Keep the SDK's device selection in sync with the devices store: micId applies

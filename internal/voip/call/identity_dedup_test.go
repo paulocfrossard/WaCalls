@@ -62,3 +62,18 @@ func TestDetachedSendContextSurvivesParentCancel(t *testing.T) {
 		t.Fatalf("detached send context must survive parent cancellation, got %v", err)
 	}
 }
+
+func TestSameDeviceJIDDistinguishesSiblings(t *testing.T) {
+	m := &CallManager{sock: newFakeSocket()}
+	same := "5511888888888:3@s.whatsapp.net"
+	sibling := "5511888888888:5@s.whatsapp.net"
+	if !m.sameDeviceJID(same, same) {
+		t.Fatal("identical device must match")
+	}
+	if m.sameDeviceJID(same, sibling) {
+		t.Fatal("different devices of the same account must NOT match")
+	}
+	if !m.sameDeviceJID("", "") {
+		t.Fatal("empty input is treated as unknown (match)")
+	}
+}

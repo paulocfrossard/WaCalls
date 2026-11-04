@@ -357,6 +357,15 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
 		return
 	}
+	// Validate the body BEFORE claiming ownership, so a bad request cannot
+	// leave the call claimed with no bridge.
+	var body struct {
+		SDPOffer string `json:"sdp_offer"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SDPOffer == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sdp_offer required"})
+		return
+	}
 	owner := clientID(r)
 	if other := s.broker.ownerActiveCall(owner); other != "" && other != callID {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call"})
@@ -367,13 +376,6 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.broker.broadcastCallList()
-	var body struct {
-		SDPOffer string `json:"sdp_offer"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SDPOffer == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sdp_offer required"})
-		return
-	}
 	bridge, answer, err := s.newBridge(body.SDPOffer, s.log)
 	if err != nil {
 		sess.removeCall(callID)
@@ -476,9 +478,15 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	status := http.StatusOK
+	state := "ok"
+	if s.broker.Draining() {
+		status = http.StatusServiceUnavailable
+		state = "draining"
+	}
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":      "ok",
+		"status":      state,
 		"activeCalls": s.broker.ActiveCallCount(),
 		"maxTotal":    s.broker.MaxTotalCalls(),
 	})

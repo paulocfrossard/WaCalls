@@ -54,24 +54,34 @@ func findOurDevice(participants []string, ownBases []string, fallback string) st
 	return fallback
 }
 
-// samePeerJID reports whether two JID strings refer to the same peer, tolerating
-// device suffixes and LID/PN spelling differences. Returns true on uncertainty
-// (empty or unparseable) so a legitimate terminate is never dropped.
-func (m *CallManager) samePeerJID(a, b string) bool {
+// sameDeviceJID reports whether two JID strings are the same DEVICE (or the
+// same LID/PN alias of that device). Different devices of the same account are
+// NOT the same. Returns true on uncertainty so a legitimate terminate from the
+// answering device is never dropped.
+func (m *CallManager) sameDeviceJID(a, b string) bool {
 	if a == "" || b == "" || m.sock == nil {
 		return true
+	}
+	if a == b {
+		return true
+	}
+	ja, ea := types.ParseJID(a)
+	jb, eb := types.ParseJID(b)
+	if ea != nil || eb != nil {
+		return true
+	}
+	// A different device number is a different device (sibling), even when the
+	// account is the same.
+	if ja.Device != jb.Device {
+		return false
 	}
 	ca, cb := wanode.CleanJID(a), wanode.CleanJID(b)
 	if ca == cb {
 		return true
 	}
-	ja, ea := types.ParseJID(ca)
-	jb, eb := types.ParseJID(cb)
-	if ea != nil || eb != nil {
-		return true
-	}
-	la := m.sock.ResolveLIDForPN(context.Background(), ja)
-	lb := m.sock.ResolveLIDForPN(context.Background(), jb)
+	// Same device number: tolerate LID/PN spelling of the same account.
+	la := m.sock.ResolveLIDForPN(context.Background(), ja.ToNonAD())
+	lb := m.sock.ResolveLIDForPN(context.Background(), jb.ToNonAD())
 	return wanode.CleanJID(la.String()) == wanode.CleanJID(lb.String())
 }
 

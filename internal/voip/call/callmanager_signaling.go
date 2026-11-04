@@ -28,6 +28,10 @@ func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, 
 	if creator == "" {
 		creator = peerJid.String()
 	}
+	if _, err := types.ParseJID(creator); err != nil {
+		m.log.Error("invalid call-creator in offer", "call_id", callID, "creator", creator, "err", err)
+		return &CallError{"invalid call-creator"}
+	}
 	isVideo := hasChildTag(info.InnerNode, "video")
 
 	if callKey == nil {
@@ -129,13 +133,10 @@ func (m *CallManager) HandleCallAccept(ctx context.Context, node *waBinary.Node,
 		return
 	}
 
+	var peerKey []byte
 	if signaling.NeedsDecryption(info.Tag) {
-		if peerKey, err := signaling.DecryptCallKeyInNode(ctx, m.sock, info.InnerNode, peerJid); err == nil && peerKey != nil {
-			m.mu.Lock()
-			if call.EncryptionKey != nil && !equalBytes(call.EncryptionKey, peerKey) {
-				m.reinitSrtpLocked(peerKey, peerJid)
-			}
-			m.mu.Unlock()
+		if k, err := signaling.DecryptCallKeyInNode(ctx, m.sock, info.InnerNode, peerJid); err == nil && k != nil {
+			peerKey = k
 		}
 	}
 
@@ -151,6 +152,11 @@ func (m *CallManager) HandleCallAccept(ctx context.Context, node *waBinary.Node,
 		m.mu.Unlock()
 		m.log.Info("accept ignored: call is gone or ended", "call_id", call.CallID)
 		return
+	}
+	// Rekey only after this accept won, so a losing sibling accept can never
+	// rewrite the SRTP keys under the winner.
+	if len(peerKey) > 0 && call.EncryptionKey != nil && !equalBytes(call.EncryptionKey, peerKey) {
+		m.reinitSrtpLocked(peerKey, peerJid)
 	}
 	_ = call.ApplyTransition(Transition{Type: TransitionRemoteAccepted})
 	m.emitState()
@@ -170,7 +176,7 @@ func (m *CallManager) HandleCallAccept(ctx context.Context, node *waBinary.Node,
 	// Resolve sibling identity outside the lock (may hit the network).
 	var siblings []types.JID
 	for _, dev := range calleeDevices {
-		if !m.samePeerJID(dev.String(), peerJid.String()) {
+		if !m.sameDeviceJID(dev.String(), peerJid.String()) {
 			siblings = append(siblings, dev)
 		}
 	}
@@ -242,6 +248,10 @@ func (m *CallManager) HandleCallTransport(ctx context.Context, node *waBinary.No
 		"relays", len(relays), "already_connected", m.relay.HasConnection())
 	if len(relays) > 0 && !m.relay.HasConnection() {
 		m.mu.Lock()
+		if m.currentCall != call || call.IsEnded() {
+			m.mu.Unlock()
+			return
+		}
 		if call.RelayData == nil {
 			call.RelayData = &core.RelayData{}
 		}
@@ -328,8 +338,8 @@ func (m *CallManager) HandleCallTerminate(node *waBinary.Node) {
 	// After an accept, only the answering device may end the call. A sibling
 	// that kept ringing times out and sends its own reject/terminate, which
 	// must not tear down the live call. Resolve identity OUTSIDE the lock:
-	// samePeerJID may hit the network (ResolveLIDForPN).
-	if acc != "" && sender != "" && !m.samePeerJID(sender, acc) {
+	// sameDeviceJID may hit the network (ResolveLIDForPN).
+	if acc != "" && sender != "" && !m.sameDeviceJID(sender, acc) {
 		m.log.Info("terminate from non-answering device ignored",
 			"call_id", call.CallID, "from", sender, "accepted_by", acc)
 		return

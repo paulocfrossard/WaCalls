@@ -35,6 +35,8 @@ export interface WaCallsConfig {
   micId?: string | null;
   /** Optional output deviceId (setSinkId) for the internal downlink <audio>. */
   outId?: string | null;
+  /** Optional session IDs to scope the SSE stream to (server filters by them). */
+  sessions?: string[] | null;
 }
 
 export type CallStatus = "starting" | "ringing" | "connected" | "ended";
@@ -217,6 +219,9 @@ export class WaCallsClient {
     if (this.#stopped || this.#es) return;
     const params = new URLSearchParams({ clientId: this.#cfg.clientId });
     if (this.#cfg.apiKey) params.set("apiKey", this.#cfg.apiKey);
+    if (this.#cfg.sessions && this.#cfg.sessions.length > 0) {
+      params.set("sessions", this.#cfg.sessions.join(","));
+    }
     const url = `${this.#cfg.baseUrl}/api/events?${params.toString()}`;
 
     let es: EventSource;
@@ -397,7 +402,12 @@ export class WaCallsClient {
         ? active.sessionId
         : sessionId;
     try {
-      await this.#request("DELETE", `/api/sessions/${encodeURIComponent(sid)}/calls/${encodeURIComponent(callId)}`);
+      await this.#request(
+        "DELETE",
+        `/api/sessions/${encodeURIComponent(sid)}/calls/${encodeURIComponent(callId)}`,
+        undefined,
+        { keepalive: true },
+      );
     } finally {
       // Local teardown must not depend on DELETE success.
       if (this.#active && this.#active.callId === callId) this.#teardownActive();
@@ -604,13 +614,18 @@ export class WaCallsClient {
     return h;
   }
 
-  async #request<T>(method: "POST" | "DELETE", path: string, body?: unknown): Promise<T> {
+  async #request<T>(
+    method: "POST" | "DELETE",
+    path: string,
+    body?: unknown,
+    opts?: { keepalive?: boolean },
+  ): Promise<T> {
     const url = `${this.#cfg.baseUrl}${path}`;
     const res = await fetch(url, {
       method,
       headers: this.#headers(),
-      // keepalive lets the hangup DELETE complete when the page is unloading.
-      keepalive: true,
+      // Only the unload/teardown DELETE needs keepalive (size-capped by fetch).
+      ...(opts?.keepalive ? { keepalive: true } : {}),
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     if (!res.ok) {

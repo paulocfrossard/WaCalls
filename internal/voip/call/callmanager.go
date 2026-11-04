@@ -165,10 +165,12 @@ func (m *CallManager) StartCall(ctx context.Context, callID string, peerJid type
 
 	offer, calleeDevices, err := signaling.BuildOfferStanza(ctx, m.sock, callID, callKey, resolved, isVideo)
 	if err != nil {
+		m.abortStart()
 		return err
 	}
 	ackNode, err := m.sock.Query(ctx, offer)
 	if err != nil {
+		m.abortStart()
 		return err
 	}
 
@@ -304,6 +306,15 @@ func (m *CallManager) EndCall(ctx context.Context, reason core.EndCallReason) er
 	}
 	m.cleanupMedia()
 	return nil
+}
+
+// abortStart clears a partially-started outgoing call (offer send failed) and
+// releases its media, so the manager/codec are not left half-initialized.
+func (m *CallManager) abortStart() {
+	m.mu.Lock()
+	m.currentCall = nil
+	m.mu.Unlock()
+	m.cleanupMedia()
 }
 
 func (m *CallManager) ownCredJid() string {

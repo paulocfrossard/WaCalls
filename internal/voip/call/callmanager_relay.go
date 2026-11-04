@@ -106,6 +106,12 @@ func (m *CallManager) connectRelays(endpoints []core.RelayEndpoint) {
 
 func (m *CallManager) cleanupMedia() {
 	m.mu.Lock()
+	// Never tear down media that belongs to a newer, still-live call on this
+	// manager (defensive; managers are normally one-shot).
+	if m.currentCall != nil && !m.currentCall.IsEnded() {
+		m.mu.Unlock()
+		return
+	}
 	codec := m.codec
 	m.codec = nil
 	if m.keepaliveStop != nil {

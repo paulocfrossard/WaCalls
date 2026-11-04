@@ -172,21 +172,6 @@ func (m *CallManager) onRelayData(data []byte) {
 	}
 	ssrc := uint32(data[8])<<24 | uint32(data[9])<<16 | uint32(data[10])<<8 | uint32(data[11])
 	seq := uint16(data[2])<<8 | uint16(data[3])
-	if m.isDuplicateRTPPacketLocked(ssrc, seq) {
-		callID := m.callIDLocked()
-		m.mu.Unlock()
-		// The relay fan-out delivers the same packet on every connected
-		// relay; forwarding it twice doubles the downlink (heard as echo /
-		// sped-up audio) and trips the dup-detector.
-		if logbuf.Enabled() && logbuf.Allow("relay-dup:"+callID, 5) {
-			logbuf.LogEvent("relay-filter", logbuf.LevelDebug, "duplicate relay packet dropped", map[string]any{
-				"call_id": callID,
-				"ssrc":    ssrc,
-				"seq":     seq,
-			})
-		}
-		return
-	}
 	if ssrc == m.selfSsrc {
 		callID := m.callIDLocked()
 		selfSsrc := m.selfSsrc
@@ -221,9 +206,23 @@ func (m *CallManager) onRelayData(data []byte) {
 	if len(pkt.Payload) == 0 {
 		return
 	}
-	// Subscription bootstrap only after the packet authenticated: RTP-shaped bytes
-	// with a spoofed SSRC must never redirect the peer subscription.
+	// Dedup and subscription bootstrap only after the packet authenticated:
+	// RTP-shaped bytes with a spoofed SSRC must never redirect the subscription
+	// or shadow a genuine packet in the dedup window.
 	m.mu.Lock()
+	if m.isDuplicateRTPPacketLocked(ssrc, seq) {
+		m.mu.Unlock()
+		// The relay fan-out delivers the same packet on every connected relay;
+		// forwarding it twice doubles the downlink and trips the dup-detector.
+		if logbuf.Enabled() && logbuf.Allow("relay-dup:"+callID, 5) {
+			logbuf.LogEvent("relay-filter", logbuf.LevelDebug, "duplicate relay packet dropped", map[string]any{
+				"call_id": callID,
+				"ssrc":    ssrc,
+				"seq":     seq,
+			})
+		}
+		return
+	}
 	if !m.actualPeerSet {
 		m.actualPeerSet = true
 		if !containsSsrc(m.peerSsrcs, ssrc) {
