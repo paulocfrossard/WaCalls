@@ -175,6 +175,11 @@ func (m *SctpRelayManager) connectToRelay(info RelayConfig) {
 	})
 	channel.OnClose(func() { m.closeConnection(id) })
 	channel.OnMessage(func(msg webrtc.DataChannelMessage) {
+		defer func() {
+			if r := recover(); r != nil {
+				m.log.Error("panic in relay receive callback", "id", id, "panic", r)
+			}
+		}()
 		if m.onReceive != nil {
 			m.onReceive(msg.Data)
 		}
