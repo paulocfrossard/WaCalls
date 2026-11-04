@@ -82,6 +82,7 @@ func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, 
 		call.RelayData = rd
 	}
 	m.currentCall = call
+	m.acceptedByJid = ""
 	m.initialTransportSent = false
 
 	selfJid := m.sock.OwnLID()

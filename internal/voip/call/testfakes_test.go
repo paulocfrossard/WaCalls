@@ -27,6 +27,7 @@ type fakeVoipSocket struct {
 
 	usyncDevices     []types.JID
 	assertErr        error
+	sendErr          error
 	participantNodes []waBinary.Node
 	participantErr   error
 	tcToken          []byte
@@ -62,6 +63,9 @@ func (f *fakeVoipSocket) AccountDeviceIdentityNode() (waBinary.Node, bool) {
 func (f *fakeVoipSocket) SendNode(ctx context.Context, node waBinary.Node) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.sendErr != nil {
+		return f.sendErr
+	}
 	f.sent = append(f.sent, node)
 	return nil
 }

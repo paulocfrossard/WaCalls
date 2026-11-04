@@ -153,6 +153,7 @@ func (m *CallManager) StartCall(ctx context.Context, callID string, peerJid type
 	callKey := media.GenerateCallKey()
 	call.EncryptionKey = callKey
 	m.currentCall = call
+	m.acceptedByJid = ""
 	m.initialTransportSent = false
 	m.outgoingPreacceptSent = false
 
@@ -204,18 +205,6 @@ func (m *CallManager) AlreadyAccepted(callID string) bool {
 		!c.CanAccept() && !c.IsEnded()
 }
 
-// EndCallForID ends the call only when it still matches callID, so a stale id
-// can never terminate a different live call on the same manager.
-func (m *CallManager) EndCallForID(ctx context.Context, callID string, reason core.EndCallReason) error {
-	m.mu.Lock()
-	match := m.currentCall != nil && m.currentCall.CallID == callID
-	m.mu.Unlock()
-	if !match {
-		return nil
-	}
-	return m.EndCall(ctx, reason)
-}
-
 func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 	m.mu.Lock()
 	call := m.currentCall
@@ -227,8 +216,6 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 		m.mu.Unlock()
 		return &CallError{"call cannot be accepted in state " + string(call.StateData.State)}
 	}
-	_ = call.ApplyTransition(Transition{Type: TransitionLocalAccepted})
-	m.emitState()
 	key := call.EncryptionKey
 	peer := wanode.MustJID(call.PeerJid)
 	creator := wanode.MustJID(call.CallCreator)
@@ -236,6 +223,9 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 	relayData := call.RelayData
 	m.mu.Unlock()
 
+	// Build and send the accept BEFORE transitioning state. If the stanza
+	// cannot be sent, the call stays ringing so the caller can roll it back
+	// instead of looking like a retried (already-accepted) call.
 	if key == nil {
 		return &CallError{"accept failed: missing call key"}
 	}
@@ -247,6 +237,16 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 		return &CallError{"send accept failed: " + err.Error()}
 	}
 
+	m.mu.Lock()
+	// Re-check under the lock: the call may have ended/changed during send.
+	if m.currentCall != call || call.IsEnded() || !call.CanAccept() {
+		m.mu.Unlock()
+		return nil
+	}
+	_ = call.ApplyTransition(Transition{Type: TransitionLocalAccepted})
+	m.emitState()
+	m.mu.Unlock()
+
 	if relayData != nil {
 		m.setupIncomingMedia(call, relayData)
 		m.connectRelays(relayData.Endpoints)
@@ -255,6 +255,15 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 	}
 	m.log.Info("call accepted", "call_id", callID)
 	return nil
+}
+
+// CanAcceptID reports whether callID is an inbound call currently in a state
+// that can be accepted (used to reject stray accepts without tearing down an
+// outbound/live call).
+func (m *CallManager) CanAcceptID(callID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.currentCall != nil && m.currentCall.CallID == callID && m.currentCall.CanAccept()
 }
 
 func (m *CallManager) setupIncomingMedia(call *CallInfo, relayData *core.RelayData) {
@@ -303,9 +312,20 @@ func (m *CallManager) RejectCall(ctx context.Context, callID string, reason core
 }
 
 func (m *CallManager) EndCall(ctx context.Context, reason core.EndCallReason) error {
+	return m.endCall(ctx, "", reason)
+}
+
+func (m *CallManager) EndCallForID(ctx context.Context, callID string, reason core.EndCallReason) error {
+	return m.endCall(ctx, callID, reason)
+}
+
+// endCall terminates the current call. When expectID is non-empty the call is
+// ended only if it still matches, and the check happens under the same lock as
+// the transition (no TOCTOU with a concurrently-replaced call).
+func (m *CallManager) endCall(ctx context.Context, expectID string, reason core.EndCallReason) error {
 	m.mu.Lock()
 	call := m.currentCall
-	if call == nil || call.IsEnded() {
+	if call == nil || call.IsEnded() || (expectID != "" && call.CallID != expectID) {
 		m.mu.Unlock()
 		return nil
 	}
