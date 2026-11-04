@@ -156,6 +156,23 @@ func (b *Broker) setOwner(id, owner string) bool {
 	return true
 }
 
+// isOwnerOrUnclaimed reports whether owner may act on id: either the call has
+// no owner yet, or it is already owned by owner. Unlike setOwner it does not
+// claim an unowned call, so only an existing owner (or a never-claimed call)
+// can reject/end it.
+func (b *Broker) isOwnerOrUnclaimed(id, owner string) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	c, ok := b.calls[id]
+	if !ok {
+		return true
+	}
+	if c.Owner == nil {
+		return true
+	}
+	return *c.Owner == owner
+}
+
 func (b *Broker) ownerActiveCall(owner string) string {
 	if owner == "" {
 		return ""
