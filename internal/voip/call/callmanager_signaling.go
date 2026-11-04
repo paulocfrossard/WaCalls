@@ -17,9 +17,9 @@ func (m *CallManager) HandleCallOffer(ctx context.Context, node *waBinary.Node, 
 		return
 	}
 	m.mu.Lock()
-	if m.currentCall != nil && !m.currentCall.IsEnded() {
+	if m.currentCall != nil {
 		m.mu.Unlock()
-		m.log.Warn("HandleCallOffer ignored: call already in progress", "call_id", info.CallID)
+		m.log.Warn("HandleCallOffer ignored: call already present", "call_id", info.CallID, "ended", m.currentCall.IsEnded())
 		return
 	}
 	m.mu.Unlock()
@@ -135,6 +135,13 @@ func (m *CallManager) HandleCallAccept(ctx context.Context, node *waBinary.Node,
 	}
 
 	m.mu.Lock()
+	// Re-check under the lock: a concurrent accept may have won between the
+	// early guard above and here.
+	if m.acceptedByJid != "" {
+		m.mu.Unlock()
+		m.log.Info("duplicate accept ignored", "accepted_by", m.acceptedByJid, "from", peerJid.String())
+		return
+	}
 	_ = call.ApplyTransition(Transition{Type: TransitionRemoteAccepted})
 	m.emitState()
 	m.acceptedByJid = peerJid.String()
@@ -299,6 +306,10 @@ func (m *CallManager) HandleCallTerminate(node *waBinary.Node) {
 	m.mu.Lock()
 	call := m.currentCall
 	if call == nil {
+		m.mu.Unlock()
+		return
+	}
+	if call.IsEnded() {
 		m.mu.Unlock()
 		return
 	}
