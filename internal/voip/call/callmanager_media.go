@@ -123,6 +123,11 @@ func (m *CallManager) startSilenceKeepaliveLocked() {
 	m.keepaliveStop = stop
 	frameSize := m.codec.FrameSize()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				m.log.Error("panic in silence keepalive", "panic", r)
+			}
+		}()
 		ticker := time.NewTicker(60 * time.Millisecond)
 		defer ticker.Stop()
 		silence := make([]float32, frameSize)
