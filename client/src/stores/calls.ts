@@ -79,10 +79,14 @@ export const ensureCallsWired = (): void => {
     // invalidation below reconciles with the authoritative row).
     const endedAt = p.endedAt ?? Date.now();
     const ended = useCalls.getState().calls.find((c) => c.callId === p.callId);
-    useCalls.setState((s) => ({
-      calls: s.calls.filter((c) => c.callId !== p.callId),
-      incoming: s.incoming.filter((c) => c.callId !== p.callId),
-    }));
+    useCalls.setState((s) => {
+      const calls = s.calls.filter((c) => c.callId !== p.callId);
+      const incoming = s.incoming.some((c) => c.callId === p.callId)
+        ? s.incoming.filter((c) => c.callId !== p.callId)
+        : s.incoming;
+      if (calls === s.calls && incoming === s.incoming) return s;
+      return { calls, incoming };
+    });
     if (ended) {
       queryClient.setQueryData<HistoryRow[]>(["history", p.sessionId], (rows) => {
         if (!rows || rows.some((r) => r.callId === p.callId)) return rows;
@@ -111,11 +115,21 @@ export const ensureCallsWired = (): void => {
     if (ev.type === "call-list") {
       useCalls.setState({ calls: ev.calls });
     } else if (ev.type === "incoming-claimed") {
-      useCalls.setState((s) => ({ incoming: s.incoming.filter((c) => c.callId !== ev.id) }));
+      useCalls.setState((s) => {
+        if (!s.incoming.some((c) => c.callId === ev.id)) return s;
+        return { incoming: s.incoming.filter((c) => c.callId !== ev.id) };
+      });
     }
   });
 };
 
 export const isMine = (call: CallSummary): boolean => call.owner === getClientId();
+
+export const removeIncoming = (callId: string): void =>
+  useCalls.setState((s) =>
+    s.incoming.some((c) => c.callId === callId)
+      ? { incoming: s.incoming.filter((c) => c.callId !== callId) }
+      : s,
+  );
 
 export const clearIncoming = (): void => useCalls.setState({ incoming: [] });

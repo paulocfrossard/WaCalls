@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { SdkRequestError } from "wacalls-sdk";
 import { sdkClient } from "@/lib/sdk-client";
 import { notifySdkCallChanged } from "@/hooks/useSdkCall";
-import { clearIncoming } from "@/stores/calls";
+import { removeIncoming } from "@/stores/calls";
 
 export const useAcceptCall = () =>
   useMutation({
@@ -27,11 +27,11 @@ export const useAcceptCall = () =>
         throw err;
       }
       notifySdkCallChanged();
-      clearIncoming();
+      removeIncoming(vars.callId);
     },
-    onError: (e: Error) => {
+    onError: (e: Error, vars: { sid: string; callId: string }) => {
       if (e instanceof SdkRequestError && e.status === 409) {
-        clearIncoming();
+        removeIncoming(vars.callId);
         return;
       }
       toast.error(e.message);

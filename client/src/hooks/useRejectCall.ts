@@ -1,6 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
 import { sdkClient } from "@/lib/sdk-client";
-import { clearIncoming } from "@/stores/calls";
+import { removeIncoming } from "@/stores/calls";
 
 export const useRejectCall = () =>
   useMutation({
@@ -9,5 +9,5 @@ export const useRejectCall = () =>
         await sdkClient.rejectCall(vars.sid, vars.callId);
       } catch {}
     },
-    onSettled: () => clearIncoming(),
+    onSettled: (_data, _error, vars) => removeIncoming(vars.callId),
   });
