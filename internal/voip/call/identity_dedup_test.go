@@ -73,6 +73,11 @@ func TestSameDeviceJIDDistinguishesSiblings(t *testing.T) {
 	if m.sameDeviceJID(same, sibling) {
 		t.Fatal("different devices of the same account must NOT match")
 	}
+	// Bare JID (device 0) is treated as unknown, so it matches the device form
+	// of the same account instead of dropping a legitimate terminate.
+	if !m.sameDeviceJID("5511888888888@s.whatsapp.net", same) {
+		t.Fatal("bare JID must match the device form of the same account")
+	}
 	if !m.sameDeviceJID("", "") {
 		t.Fatal("empty input is treated as unknown (match)")
 	}

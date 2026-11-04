@@ -36,9 +36,9 @@ if (typeof window !== "undefined") {
     sdkClient.disconnect();
   });
   window.addEventListener("pageshow", (e) => {
-    // Restored from bfcache: reconnect the SSE stream that pagehide may have
-    // stopped (only when this was a persisted restore).
-    if (e.persisted) sdkClient.connect();
+    // Restored from bfcache: the frozen EventSource may be dead, so force a
+    // fresh stream (without tearing down the active call).
+    if (e.persisted) sdkClient.reconnectStream();
   });
 }
 

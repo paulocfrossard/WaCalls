@@ -359,6 +359,7 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 	}
 	// Validate the body BEFORE claiming ownership, so a bad request cannot
 	// leave the call claimed with no bridge.
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	var body struct {
 		SDPOffer string `json:"sdp_offer"`
 	}
@@ -434,6 +435,10 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 	s.broker.broadcastCallList()
 	s.broker.emitIncomingClaimed(sess.id, id, owner)
 	if err := ac.cm.AcceptCall(r.Context(), id); err != nil {
+		// The claim was already broadcast; roll it back so the call does not
+		// stay owned with no media and other operators can retry.
+		sess.removeCall(id)
+		s.broker.endCall(id, string(core.EndCallReasonUserEnded))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -443,13 +448,18 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 func (s *server) doReject(sess *Session, w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	owner := clientID(r)
+	// Resolve the call through THIS session first: a callID from another
+	// session must never be rejected/ended through this session's handler.
+	ac, ok := sess.reg.get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
+		return
+	}
 	if !s.broker.isOwnerOrUnclaimed(id, owner) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
 		return
 	}
-	if ac, ok := sess.reg.get(id); ok {
-		_ = ac.cm.RejectCall(r.Context(), id, core.EndCallReasonDeclined)
-	}
+	_ = ac.cm.RejectCall(r.Context(), id, core.EndCallReasonDeclined)
 	sess.removeCall(id)
 	s.broker.endCall(id, string(core.EndCallReasonDeclined))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -458,13 +468,17 @@ func (s *server) doReject(sess *Session, w http.ResponseWriter, r *http.Request)
 func (s *server) doEndCall(sess *Session, w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	owner := clientID(r)
+	// Resolve through THIS session: never end another session's call.
+	ac, ok := sess.reg.get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
+		return
+	}
 	if !s.broker.isOwnerOrUnclaimed(id, owner) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
 		return
 	}
-	if ac, ok := sess.reg.get(id); ok {
-		_ = ac.cm.EndCall(r.Context(), core.EndCallReasonUserEnded)
-	}
+	_ = ac.cm.EndCall(r.Context(), core.EndCallReasonUserEnded)
 	sess.removeCall(id)
 	s.broker.endCall(id, string(core.EndCallReasonUserEnded))
 	w.WriteHeader(http.StatusNoContent)

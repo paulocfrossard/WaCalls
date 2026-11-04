@@ -194,6 +194,18 @@ export class WaCallsClient {
     this.#openEventSource();
   }
 
+  /**
+   * Force a fresh SSE stream without touching the active call. Used after a
+   * bfcache restore, where the frozen EventSource may be silently dead.
+   */
+  reconnectStream(): void {
+    this.#es?.close();
+    this.#es = null;
+    this.#stopped = false;
+    this.#reconnectMs = RECONNECT_BASE_MS;
+    this.#openEventSource();
+  }
+
   /** Close the SSE stream, cancel reconnects and release any active call. */
   disconnect(): void {
     this.#stopped = true;

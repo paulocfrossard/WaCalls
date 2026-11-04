@@ -427,6 +427,9 @@ func (b *Broker) serveSSE(w http.ResponseWriter, r *http.Request, clientID strin
 
 	if b.SnapshotFn != nil {
 		for _, ev := range b.SnapshotFn() {
+			if !sub.wantsEvent(ev) {
+				continue
+			}
 			writeSSE(w, flusher, ev)
 		}
 	}

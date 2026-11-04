@@ -70,9 +70,11 @@ func (m *CallManager) sameDeviceJID(a, b string) bool {
 	if ea != nil || eb != nil {
 		return true
 	}
-	// A different device number is a different device (sibling), even when the
-	// account is the same.
-	if ja.Device != jb.Device {
+	// Only when BOTH sides carry a concrete device number can we prove they
+	// are different devices. Device 0 (bare JID) is treated as unknown so a
+	// terminate from the answering device is never dropped just because one
+	// spelling omits the device suffix.
+	if ja.Device != 0 && jb.Device != 0 && ja.Device != jb.Device {
 		return false
 	}
 	ca, cb := wanode.CleanJID(a), wanode.CleanJID(b)

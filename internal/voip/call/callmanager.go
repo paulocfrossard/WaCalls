@@ -242,8 +242,10 @@ func (m *CallManager) setupIncomingMedia(call *CallInfo, relayData *core.RelayDa
 			m.rtpSession = media.NewWhatsAppOpusSession(newSelf)
 		}
 		if peer := firstPeerDevice(relayData.ParticipantJids, ourBases); peer != "" {
+			// Best-effort subscription guess; the SSRC is confirmed (and
+			// corrected if wrong) from the first authenticated RTP packet.
 			m.peerSsrcs = []uint32{media.GenerateSecureSsrc(call.CallID, ensureDeviceJid(peer), 0)}
-			m.actualPeerSet = true
+			m.actualPeerSet = false
 		} else {
 			m.actualPeerSet = false
 			m.log.Warn("participant list has no peer device; waiting for first RTP packet to learn SSRC", "call_id", call.CallID)

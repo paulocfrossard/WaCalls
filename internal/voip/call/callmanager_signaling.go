@@ -257,6 +257,14 @@ func (m *CallManager) HandleCallTransport(ctx context.Context, node *waBinary.No
 		}
 		call.RelayData.Endpoints = relays
 		m.mu.Unlock()
+		// Re-check before dialing: the call may have ended/replaced since the
+		// guard above (connectRelays does network I/O).
+		m.mu.Lock()
+		stale := m.currentCall != call || call.IsEnded()
+		m.mu.Unlock()
+		if stale {
+			return
+		}
 		m.connectRelays(relays)
 	}
 }
