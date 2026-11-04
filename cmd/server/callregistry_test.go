@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"wacalls/internal/voip/call"
+)
 
 func TestCallRegistryAddGetRemove(t *testing.T) {
 	r := newCallRegistry()
@@ -53,5 +57,41 @@ func TestCallRegistrySetBridgeMissing(t *testing.T) {
 	_, found := r.setBridge("nope", nil)
 	if found {
 		t.Fatal("setBridge on missing call must report not-found")
+	}
+}
+
+func TestCallRegistryAddIfAbsentKeepsExisting(t *testing.T) {
+	r := newCallRegistry()
+	first := &activeCall{}
+	if !r.addIfAbsent("c1", first) {
+		t.Fatal("first insert must succeed")
+	}
+	if r.addIfAbsent("c1", &activeCall{}) {
+		t.Fatal("second insert for the same callID must be rejected")
+	}
+	got, ok := r.get("c1")
+	if !ok || got != first {
+		t.Fatal("rejected insert must not overwrite the live call")
+	}
+}
+
+func TestCallRegistryGetWithBridgeAndBridgeIs(t *testing.T) {
+	r := newCallRegistry()
+	cm := &call.CallManager{}
+	b := &Bridge{}
+	r.add("c1", &activeCall{cm: cm, bridge: b})
+
+	gotCm, gotB, ok := r.getWithBridge("c1")
+	if !ok || gotCm != cm || gotB != b {
+		t.Fatalf("getWithBridge mismatch: ok=%v", ok)
+	}
+	if !r.bridgeIs("c1", b) {
+		t.Fatal("bridgeIs must accept the current bridge")
+	}
+	if r.bridgeIs("c1", &Bridge{}) {
+		t.Fatal("bridgeIs must reject a different bridge")
+	}
+	if r.bridgeIs("missing", b) {
+		t.Fatal("bridgeIs must reject a missing call")
 	}
 }
