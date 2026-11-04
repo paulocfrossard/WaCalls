@@ -169,7 +169,10 @@ func (b *Broker) unsubscribe(s *subscriber) {
 	b.mu.Lock()
 	delete(b.subs, s)
 	b.mu.Unlock()
-	close(s.ch)
+	// Do NOT close(s.ch): broadcast snapshots subscribers and sends outside
+	// the lock, so closing here would race a send and panic ("send on closed
+	// channel"). The reader exits on r.Context().Done(); the channel is GC'd
+	// with the subscriber.
 }
 
 func (b *Broker) broadcast(ev any) {
