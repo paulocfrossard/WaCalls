@@ -1,6 +1,7 @@
 package call
 
 import (
+	"time"
 	"wacalls/internal/voip/core"
 	"wacalls/internal/voip/transport"
 )
@@ -91,6 +92,8 @@ func (m *CallManager) cleanupMedia() {
 	m.actualPeerSet = false
 	m.encodeBuf = nil
 	m.encodeBufPos = 0
+	m.seenRTP = nil
+	m.seenRTPPrune = time.Time{}
 	m.mu.Unlock()
 
 	m.relay.Cleanup()
