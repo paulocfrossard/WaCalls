@@ -78,6 +78,19 @@ func (r *callRegistry) remove(callID string) (*activeCall, bool) {
 	return ac, true
 }
 
+// statsSnapshot returns the per-call media counters for every live call.
+func (r *callRegistry) statsSnapshot() []call.CallStats {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]call.CallStats, 0, len(r.calls))
+	for id, ac := range r.calls {
+		if ac.cm != nil {
+			out = append(out, ac.cm.StatsFor(id))
+		}
+	}
+	return out
+}
+
 func (r *callRegistry) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()

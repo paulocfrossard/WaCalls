@@ -68,6 +68,21 @@ func (m *SessionManager) Get(id string) (*Session, bool) {
 	return s, ok
 }
 
+// callStats aggregates per-call media counters across all sessions.
+func (m *SessionManager) callStats() []call.CallStats {
+	m.mu.RLock()
+	all := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		all = append(all, s)
+	}
+	m.mu.RUnlock()
+	var out []call.CallStats
+	for _, s := range all {
+		out = append(out, s.reg.statsSnapshot()...)
+	}
+	return out
+}
+
 func (m *SessionManager) infos() []SessionInfo {
 	m.mu.RLock()
 	ordered := make([]*Session, 0, len(m.order))

@@ -57,6 +57,12 @@ type CallManager struct {
 	// graceful drain can wait (bounded) for them before exit.
 	pendingSends atomic.Int64
 
+	// Per-call media counters for /api/stats (dependency-free observability).
+	framesDecoded atomic.Uint64
+	dupDropped    atomic.Uint64
+	srtpErrors    atomic.Uint64
+	lastDownlink  atomic.Int64 // unix ms of the last decoded frame, 0 if none
+
 	OnStateChange func(*CallInfo)
 	OnIncoming    func(*CallInfo)
 	OnEnded       func(*CallInfo)
@@ -562,6 +568,35 @@ func (m *CallManager) isDuplicateRTPPacketLocked(ssrc uint32, seq uint16) bool {
 type CallError struct{ Msg string }
 
 func (e *CallError) Error() string { return e.Msg }
+
+// CallStats is the per-call observability snapshot served by /api/stats.
+type CallStats struct {
+	CallID        string `json:"callId"`
+	FramesDecoded uint64 `json:"framesDecoded"`
+	DupDropped    uint64 `json:"dupDropped"`
+	SrtpErrors    uint64 `json:"srtpErrors"`
+	DownlinkGapMs int64  `json:"downlinkGapMs"` // -1 before the first frame
+	RelayConns    int    `json:"relayConns"`
+	PendingSends  int64  `json:"pendingSends"`
+}
+
+// StatsFor returns the counters for callID (the registry key, since the
+// manager may not know its own id after cleanup).
+func (m *CallManager) StatsFor(callID string) CallStats {
+	st := CallStats{
+		CallID:        callID,
+		FramesDecoded: m.framesDecoded.Load(),
+		DupDropped:    m.dupDropped.Load(),
+		SrtpErrors:    m.srtpErrors.Load(),
+		RelayConns:    m.relay.ConnectedCount(),
+		PendingSends:  m.pendingSends.Load(),
+		DownlinkGapMs: -1,
+	}
+	if last := m.lastDownlink.Load(); last > 0 {
+		st.DownlinkGapMs = time.Now().UnixMilli() - last
+	}
+	return st
+}
 
 // detachedSendContext keeps a detached send alive after the caller (usually
 // an HTTP handler) returns and cancels its request context. Without this the

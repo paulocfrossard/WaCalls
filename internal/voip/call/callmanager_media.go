@@ -194,6 +194,7 @@ func (m *CallManager) onRelayData(data []byte) {
 	pkt, err := srtp.Unprotect(data)
 	if err != nil {
 		m.log.Debug("srtp unprotect error", "err", err)
+		m.srtpErrors.Add(1)
 		if logbuf.Enabled() && logbuf.Allow("srtp-unprotect:"+callID, 5) {
 			logbuf.LogEvent("srtp", logbuf.LevelError, "srtp unprotect failed (packet dropped)", map[string]any{
 				"call_id": callID,
@@ -212,6 +213,7 @@ func (m *CallManager) onRelayData(data []byte) {
 	m.mu.Lock()
 	if m.isDuplicateRTPPacketLocked(ssrc, seq) {
 		m.mu.Unlock()
+		m.dupDropped.Add(1)
 		// The relay fan-out delivers the same packet on every connected relay;
 		// forwarding it twice doubles the downlink and trips the dup-detector.
 		if logbuf.Enabled() && logbuf.Allow("relay-dup:"+callID, 5) {
@@ -244,6 +246,8 @@ func (m *CallManager) onRelayData(data []byte) {
 		return
 	}
 	pcm = media.NormalizeFrame(pcm, codec.FrameSize())
+	m.framesDecoded.Add(1)
+	m.lastDownlink.Store(time.Now().UnixMilli())
 	// Rate-limited 5/s: len/peak show whether dead air or hot audio follows.
 	if logbuf.Enabled() && logbuf.Allow("downlink-decode:"+callID, 5) {
 		rms, peak := logbuf.PCMStats(pcm)
