@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"wacalls/internal/voip/call"
@@ -32,6 +33,16 @@ type Session struct {
 	reg    *callRegistry
 
 	newCallManager func(callID string) *call.CallManager
+
+	// offlineReplaying is set while WhatsApp replays events buffered during
+	// downtime, so stale call offers from that window are dropped instead of
+	// surfacing as ghost ringing calls.
+	offlineReplaying atomic.Bool
+	// replayGen tags each replay window with a generation so a backstop timer
+	// armed by an earlier OfflineSyncPreview cannot close a later window.
+	replayGen atomic.Int64
+	// replayWindow overrides offlineReplayMaxWindow when non-zero; test-only knob.
+	replayWindow time.Duration
 
 	mu   sync.Mutex
 	auth AuthSnapshot
@@ -213,7 +224,19 @@ func (s *Session) handleEvent(rawEvt any) {
 		s.setAuth(AuthSnapshot{State: "open", Paired: true})
 	case *events.LoggedOut:
 		s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
+	case *events.OfflineSyncPreview:
+		// The server is about to replay events missed while offline; drop call
+		// offers until it finishes. A backstop timer clears the window if
+		// OfflineSyncCompleted is never seen.
+		s.armReplayWindow()
+	case *events.OfflineSyncCompleted:
+		s.offlineReplaying.Store(false)
 	case *events.CallOffer:
+		if isStaleOffer(evt.Timestamp, s.offlineReplaying.Load(), time.Now()) {
+			s.log.Info("dropping stale call offer replayed from offline buffer",
+				"call_id", callIDFromNode(wrapCall(evt.From, evt.Data)), "offer_ts", evt.Timestamp)
+			return
+		}
 		s.onIncomingOffer(ctx, evt)
 	case *events.CallAccept:
 		if ac, ok := s.callForEvent(evt.From, evt.Data); ok {
