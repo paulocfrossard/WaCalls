@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
+
+	"wacalls/internal/voip/call"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -205,8 +208,8 @@ func (m *SessionManager) disconnectAll() {
 	}
 }
 
-// drainAll ends every call on every session and gives terminate stanzas a
-// bounded window to be sent before the process exits.
+// drainAll ends every call on every session and waits (bounded) for the
+// detached terminate/reject sends before the process exits.
 func (m *SessionManager) drainAll() {
 	m.mu.RLock()
 	all := make([]*Session, 0, len(m.sessions))
@@ -214,7 +217,20 @@ func (m *SessionManager) drainAll() {
 		all = append(all, s)
 	}
 	m.mu.RUnlock()
+	cms := make([]*call.CallManager, 0, len(all))
 	for _, s := range all {
-		s.teardownAllCalls()
+		cms = append(cms, s.teardownAllCalls()...)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for _, cm := range cms {
+		remain := time.Until(deadline)
+		if remain <= 0 {
+			m.log.Warn("drain: timeout waiting for terminate sends")
+			return
+		}
+		if !cm.WaitPendingSends(remain) {
+			m.log.Warn("drain: terminate send still pending for a call")
+			return
+		}
 	}
 }

@@ -209,6 +209,11 @@ func (m *SctpRelayManager) connectToRelay(info RelayConfig) {
 	}
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				m.log.Error("panic in relay watchdog", "id", id, "panic", r)
+			}
+		}()
 		select {
 		case <-time.After(relayConnectionTimeout):
 			if conn.getState() == relayStateConnecting {

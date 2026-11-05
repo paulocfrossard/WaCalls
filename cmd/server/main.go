@@ -79,9 +79,8 @@ func main() {
 	<-ctx.Done()
 	log.Info("shutting down")
 	srv.broker.SetDraining(true)
+	// Ends all calls and waits (bounded, 3s) for the terminate sends.
 	srv.sessions.drainAll()
-	// Give terminate/reject stanzas a bounded window to be sent.
-	time.Sleep(2 * time.Second)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)

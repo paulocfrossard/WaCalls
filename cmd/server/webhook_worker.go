@@ -194,6 +194,11 @@ func (w *webhookWorker) deliver(ctx context.Context, job webhookJob) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-w.sem }()
+			defer func() {
+				if r := recover(); r != nil {
+					w.log.Error("panic in webhook delivery", "panic", r)
+				}
+			}()
 			w.deliverOne(jobCtx, h, job)
 		}()
 	}

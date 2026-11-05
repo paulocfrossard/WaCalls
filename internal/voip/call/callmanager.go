@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 	"wacalls/internal/voip/core"
 	"wacalls/internal/voip/media"
@@ -51,6 +52,10 @@ type CallManager struct {
 	// (the relay fan-out duplicates the peer stream). Keyed by ssrc<<16|seq.
 	seenRTP      map[uint64]time.Time
 	seenRTPPrune time.Time
+
+	// pendingSends counts detached terminate/reject sends in flight so a
+	// graceful drain can wait (bounded) for them before exit.
+	pendingSends atomic.Int64
 
 	OnStateChange func(*CallInfo)
 	OnIncoming    func(*CallInfo)
@@ -187,7 +192,14 @@ func (m *CallManager) StartCall(ctx context.Context, callID string, peerJid type
 	m.mu.Unlock()
 
 	if ackNode != nil {
-		go m.HandleCallAck(context.Background(), ackNode)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					m.log.Error("panic in HandleCallAck", "panic", r)
+				}
+			}()
+			m.HandleCallAck(context.Background(), ackNode)
+		}()
 	}
 
 	m.log.Info("call offer sent", "call_id", callID, "peer", resolved.String())
@@ -323,7 +335,14 @@ func (m *CallManager) AbortAccept(ctx context.Context, callID string) (aborted, 
 
 	// Build the stanza OUTSIDE the lock (MustJID must not panic under m.mu).
 	node := signaling.BuildTerminateStanza(wanode.MustJID(termDest), cid, wanode.MustJID(creator))
+	m.pendingSends.Add(1)
 	go func() {
+		defer m.pendingSends.Add(-1)
+		defer func() {
+			if r := recover(); r != nil {
+				m.log.Error("panic in detached send", "panic", r)
+			}
+		}()
 		sendCtx, cancel := detachedSendContext(ctx)
 		defer cancel()
 		_, _ = m.sock.Query(sendCtx, node)
@@ -386,7 +405,14 @@ func (m *CallManager) RejectCall(ctx context.Context, callID string, reason core
 
 	// Build the stanza outside the lock (MustJID must not panic under m.mu).
 	node := signaling.BuildRejectStanza(wanode.MustJID(peerJid), cid, wanode.MustJID(creator))
+	m.pendingSends.Add(1)
 	go func() {
+		defer m.pendingSends.Add(-1)
+		defer func() {
+			if r := recover(); r != nil {
+				m.log.Error("panic in detached send", "panic", r)
+			}
+		}()
 		sendCtx, cancel := detachedSendContext(ctx)
 		defer cancel()
 		_, _ = m.sock.Query(sendCtx, node)
@@ -431,7 +457,14 @@ func (m *CallManager) endCall(ctx context.Context, expectID string, reason core.
 
 	// Build the stanza outside the lock (MustJID must not panic under m.mu).
 	node := signaling.BuildTerminateStanza(wanode.MustJID(termDest), cid, wanode.MustJID(creator))
+	m.pendingSends.Add(1)
 	go func() {
+		defer m.pendingSends.Add(-1)
+		defer func() {
+			if r := recover(); r != nil {
+				m.log.Error("panic in detached send", "panic", r)
+			}
+		}()
 		sendCtx, cancel := detachedSendContext(ctx)
 		defer cancel()
 		_, _ = m.sock.Query(sendCtx, node)
@@ -441,6 +474,21 @@ func (m *CallManager) endCall(ctx context.Context, expectID string, reason core.
 	}
 	m.cleanupMedia()
 	return nil
+}
+
+// WaitPendingSends blocks until every detached terminate/reject send has
+// finished or the timeout elapses; returns false on timeout.
+func (m *CallManager) WaitPendingSends(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if m.pendingSends.Load() == 0 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // abortStart clears a partially-started outgoing call (offer send failed) and

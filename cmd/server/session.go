@@ -364,7 +364,8 @@ func (s *Session) terminateCallIfBridge(callID string, b *Bridge) {
 	_ = ac.cm.EndCall(context.Background(), core.EndCallReasonUserEnded)
 }
 
-func (s *Session) teardownAllCalls() {
+func (s *Session) teardownAllCalls() []*call.CallManager {
+	cms := make([]*call.CallManager, 0)
 	for _, ac := range s.reg.drain() {
 		_ = ac.cm.EndCall(context.Background(), core.EndCallReasonUserEnded)
 		if ac.bridge != nil {
@@ -375,7 +376,9 @@ func (s *Session) teardownAllCalls() {
 		if ac.admitted {
 			s.mgr.broker.releaseAdmission()
 		}
+		cms = append(cms, ac.cm)
 	}
+	return cms
 }
 
 func (s *Session) replaceClient(client *whatsmeow.Client) {
