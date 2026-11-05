@@ -1,10 +1,9 @@
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { SdkRequestError } from "wacalls-sdk";
-import { sdkClient } from "@/lib/sdk-client";
+import { sdkClient, sdkErrorCode } from "@/lib/sdk-client";
 import { notifySdkCallChanged } from "@/hooks/useSdkCall";
 import { removeIncoming } from "@/stores/calls";
-import { sdkErrorCode } from "@/lib/sdk-client";
 
 export const useAcceptCall = () =>
   useMutation({
