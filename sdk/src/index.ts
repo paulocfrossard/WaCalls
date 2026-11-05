@@ -351,7 +351,14 @@ export class WaCallsClient {
           ...(endedAt !== undefined ? { endedAt } : {}),
         };
         this.#emitter.emit("call:ended", payload);
-        if (this.#active && this.#active.callId === callId) this.#teardownActive();
+        // Composite identity: two sessions can surface the same call id.
+        if (
+          this.#active &&
+          this.#active.callId === callId &&
+          this.#active.sessionId === payload.sessionId
+        ) {
+          this.#teardownActive();
+        }
         return;
       }
       default:
@@ -387,7 +394,15 @@ export class WaCallsClient {
       this.#emitError(msg);
       throw new Error(msg);
     }
-    await this.#openMedia(sessionId, callId);
+    try {
+      await this.#openMedia(sessionId, callId);
+    } catch (err) {
+      // The server call is already live and owned by this client. Undo it so
+      // the remote phone does not ring forever with no local media (mirrors
+      // the accept-path compensation in the app hooks).
+      void this.hangup(sessionId, callId).catch(() => {});
+      throw err;
+    }
   }
 
   /** POST .../accept — then opens media (user-triggered; autoplay-safe). */

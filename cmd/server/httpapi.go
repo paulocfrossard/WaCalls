@@ -60,7 +60,9 @@ func (s *server) routes() http.Handler {
 func withCORS(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Client-Id")
+		// Authorization is accepted (and ignored by the LAN-trust server) so a
+		// client configured with VITE_WACALLS_API_KEY can preflight cross-origin.
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Client-Id, Authorization")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -550,6 +552,7 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"gcPauseNs":     m.PauseNs[(m.NumGC+255)%256],
 		"openFds":       fds,
 		"droppedEvents": s.broker.DroppedEvents(),
+		"calls":         s.sessions.callStats(),
 	})
 }
 func normalizePhone(p string) string {

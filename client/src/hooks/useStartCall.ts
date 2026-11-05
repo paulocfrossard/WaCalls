@@ -1,5 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { SdkRequestError } from "wacalls-sdk";
 import { sdkClient } from "@/lib/sdk-client";
 import { notifySdkCallChanged } from "@/hooks/useSdkCall";
 
@@ -11,9 +12,26 @@ export const useStartCall = (sid: string) =>
       notifySdkCallChanged();
     },
     onError: (e: Error) => {
-      const m = e.message;
-      if (m.includes("429")) toast.error("Limit reached: max concurrent calls.");
-      else if (m.includes("503")) toast.error("WhatsApp not paired.");
-      else toast.error(m);
+      // Classify on the HTTP status (the raw message embeds the whole
+      // "METHOD path status body" string, so substring matching is brittle).
+      if (e instanceof SdkRequestError) {
+        if (e.status === 409) {
+          toast.error("You are already on a call");
+          return;
+        }
+        if (e.status === 429) {
+          toast.error(
+            e.body.includes("max total")
+              ? "Server call limit reached."
+              : "Limit reached: max concurrent calls.",
+          );
+          return;
+        }
+        if (e.status === 503) {
+          toast.error("WhatsApp not paired.");
+          return;
+        }
+      }
+      toast.error(e.message);
     },
   });

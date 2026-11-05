@@ -27,11 +27,20 @@ export const useAcceptCall = () =>
         throw err;
       }
       notifySdkCallChanged();
-      removeIncoming(vars.callId);
+      removeIncoming(vars.sid, vars.callId);
     },
     onError: (e: Error, vars: { sid: string; callId: string }) => {
       if (e instanceof SdkRequestError && e.status === 409) {
-        removeIncoming(vars.callId);
+        // The server distinguishes three 409s. Only "operator already on a
+        // call" leaves the ringing call unclaimed — keep it queued so the
+        // operator can retry after ending the current call. The other two
+        // (claimed by another client / not in an acceptable state) mean this
+        // operator can no longer act on the call: drop it from the queue.
+        if (e.body.includes("operator already on a call")) {
+          toast.error("You are already on a call");
+          return;
+        }
+        removeIncoming(vars.sid, vars.callId);
         return;
       }
       toast.error(e.message);

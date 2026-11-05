@@ -8,12 +8,12 @@ export const useRejectCall = () =>
   useMutation({
     mutationFn: (vars: { sid: string; callId: string }) =>
       sdkClient.rejectCall(vars.sid, vars.callId),
-    onSuccess: (_data, vars) => removeIncoming(vars.callId),
+    onSuccess: (_data, vars) => removeIncoming(vars.sid, vars.callId),
     onError: (e: Error, vars) => {
       // 404/409: already gone or claimed by another operator — drop the entry.
       // Any other failure keeps it ringing so the operator can retry.
       if (e instanceof SdkRequestError && (e.status === 404 || e.status === 409)) {
-        removeIncoming(vars.callId);
+        removeIncoming(vars.sid, vars.callId);
         return;
       }
       toast.error(e.message);

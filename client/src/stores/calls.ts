@@ -78,14 +78,16 @@ export const ensureCallsWired = (): void => {
     // (the server appends to history BEFORE broadcasting call-ended, so the
     // invalidation below reconciles with the authoritative row).
     const endedAt = p.endedAt ?? Date.now();
-    const ended = useCalls.getState().calls.find((c) => c.callId === p.callId);
+    const same = (c: { sessionId: string; callId: string }) =>
+      c.callId === p.callId && c.sessionId === p.sessionId;
+    const ended = useCalls.getState().calls.find(same);
     useCalls.setState((s) => {
-      const hadCall = s.calls.some((c) => c.callId === p.callId);
-      const hadIncoming = s.incoming.some((c) => c.callId === p.callId);
+      const hadCall = s.calls.some(same);
+      const hadIncoming = s.incoming.some(same);
       if (!hadCall && !hadIncoming) return s;
       return {
-        calls: hadCall ? s.calls.filter((c) => c.callId !== p.callId) : s.calls,
-        incoming: hadIncoming ? s.incoming.filter((c) => c.callId !== p.callId) : s.incoming,
+        calls: hadCall ? s.calls.filter((c) => !same(c)) : s.calls,
+        incoming: hadIncoming ? s.incoming.filter((c) => !same(c)) : s.incoming,
       };
     });
     if (ended) {
@@ -118,15 +120,17 @@ export const ensureCallsWired = (): void => {
         // The snapshot is already owner-scoped: a call claimed by another
         // operator drops out. Prune the incoming queue so a non-owner stops
         // ringing once someone else claims the call.
-        const ids = new Set(ev.calls.map((c) => c.callId));
-        const incoming = s.incoming.filter((c) => ids.has(c.callId));
+        const ids = new Set(ev.calls.map((c) => `${c.sessionId}\u0000${c.callId}`));
+        const incoming = s.incoming.filter((c) => ids.has(`${c.sessionId}\u0000${c.callId}`));
         if (incoming.length === s.incoming.length) return { calls: ev.calls };
         return { calls: ev.calls, incoming };
       });
     } else if (ev.type === "incoming-claimed") {
       useCalls.setState((s) => {
-        if (!s.incoming.some((c) => c.callId === ev.id)) return s;
-        return { incoming: s.incoming.filter((c) => c.callId !== ev.id) };
+        const hit = (c: { sessionId: string; callId: string }) =>
+          c.callId === ev.id && c.sessionId === ev.sessionId;
+        if (!s.incoming.some(hit)) return s;
+        return { incoming: s.incoming.filter((c) => !hit(c)) };
       });
     }
   });
@@ -134,10 +138,13 @@ export const ensureCallsWired = (): void => {
 
 export const isMine = (call: CallSummary): boolean => call.owner === getClientId();
 
-export const removeIncoming = (callId: string): void =>
+// removeIncoming drops one ringing entry. sessionId is part of the identity:
+// two sessions may in theory surface the same WhatsApp call id, so the pair
+// (sessionId, callId) is what identifies an entry.
+export const removeIncoming = (sessionId: string, callId: string): void =>
   useCalls.setState((s) =>
-    s.incoming.some((c) => c.callId === callId)
-      ? { incoming: s.incoming.filter((c) => c.callId !== callId) }
+    s.incoming.some((c) => c.sessionId === sessionId && c.callId === callId)
+      ? { incoming: s.incoming.filter((c) => !(c.sessionId === sessionId && c.callId === callId)) }
       : s,
   );
 
