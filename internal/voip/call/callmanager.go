@@ -223,11 +223,14 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 	}
 	m.acceptingCallID = callID
 	key := call.EncryptionKey
-	peer := wanode.MustJID(call.PeerJid)
-	creator := wanode.MustJID(call.CallCreator)
+	peerJid := call.PeerJid
+	creatorJid := call.CallCreator
 	isVideo := call.MediaType == core.CallMediaTypeVideo
 	relayData := call.RelayData
 	m.mu.Unlock()
+
+	peer := wanode.MustJID(peerJid)
+	creator := wanode.MustJID(creatorJid)
 
 	// Always release the in-flight marker, even if a send panics.
 	defer func() {
@@ -287,25 +290,25 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 // AbortAccept rolls back a failed accept. It aborts (ends) the call only when
 // it is still ringing and no accept for it is in flight. It reports whether it
 // aborted, and whether the call is already accepted (a concurrent accept won).
-func (m *CallManager) AbortAccept(ctx context.Context, callID string) (aborted, accepted bool) {
+func (m *CallManager) AbortAccept(ctx context.Context, callID string) (aborted, accepted, gone bool) {
 	m.mu.Lock()
 	call := m.currentCall
 	if m.acceptingCallID == callID {
 		m.mu.Unlock()
-		return false, false
+		return false, false, false
 	}
 	if call == nil || call.CallID != callID {
 		m.mu.Unlock()
-		return false, false
+		return false, false, true
 	}
 	if call.IsEnded() {
 		m.mu.Unlock()
-		return false, false
+		return false, false, true
 	}
 	if !call.CanAccept() {
 		// Past ringing but not ended => another accept already won.
 		m.mu.Unlock()
-		return false, true
+		return false, true, false
 	}
 	_ = call.ApplyTransition(Transition{Type: TransitionTerminated, Reason: core.EndCallReasonUserEnded})
 	termDest := call.PeerJid
@@ -326,7 +329,7 @@ func (m *CallManager) AbortAccept(ctx context.Context, callID string) (aborted, 
 		m.OnEnded(ended)
 	}
 	m.cleanupMedia()
-	return true, false
+	return true, false, false
 }
 
 // AbortAccept rolls back a failed accept, but only if the call is STILL
