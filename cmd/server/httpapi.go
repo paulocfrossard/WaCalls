@@ -423,17 +423,18 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
 		return
 	}
+	owner := clientID(r)
 	// Only an inbound ringing call can be accepted. A stray accept for an
 	// outbound/live call must not claim or tear it down.
 	if !ac.cm.CanAcceptID(id) {
-		if ac.cm.AlreadyAccepted(id) {
+		// Retry by the owner of an already-accepted call is a no-op.
+		if ac.cm.AlreadyAccepted(id) && s.broker.isOwnerOrUnclaimed(id, owner) {
 			writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": id}})
 			return
 		}
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "call is not in an acceptable state"})
 		return
 	}
-	owner := clientID(r)
 	if other := s.broker.ownerActiveCall(owner); other != "" && other != id {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call"})
 		return
@@ -445,19 +446,16 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 	s.broker.broadcastCallList()
 	s.broker.emitIncomingClaimed(sess.id, id, owner)
 	if err := ac.cm.AcceptCall(r.Context(), id); err != nil {
-		// A concurrent accept (double-click / retry by the same owner) may have
-		// won after our CanAcceptID check; that is a no-op, not a reason to
-		// tear down the now-live call.
-		if ac.cm.AlreadyAccepted(id) {
-			writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": id}})
+		// AbortAccept is atomic: it rolls back only if the call is still
+		// ringing, so a concurrent accept that already won is never torn down.
+		if ac.cm.AbortAccept(r.Context(), id) {
+			sess.removeCall(id)
+			s.broker.endCall(id, string(core.EndCallReasonUserEnded))
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		// AcceptCall only fails before transitioning (build/send/key), so this
-		// is a real failure: stop THIS call and roll back the claim.
-		_ = ac.cm.EndCallForID(r.Context(), id, core.EndCallReasonUserEnded)
-		sess.removeCall(id)
-		s.broker.endCall(id, string(core.EndCallReasonUserEnded))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		// Lost the race to another accept: report success, do not teardown.
+		writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": id}})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": id}})

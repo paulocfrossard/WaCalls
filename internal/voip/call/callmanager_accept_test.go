@@ -41,3 +41,30 @@ func TestEndCallForIDIgnoresMismatch(t *testing.T) {
 		t.Fatal("a mismatched id must not end the live call")
 	}
 }
+
+func TestAbortAcceptOnlyAbortsRinging(t *testing.T) {
+	// Ringing: abort succeeds and ends the call.
+	m := newTestManager(t, newFakeSocket(), newFakeRelay(), &passthroughCodec{})
+	r := NewIncomingCall("A", "peer@lid", "creator@lid", "", core.CallMediaTypeAudio)
+	m.currentCall = r
+	if !m.AbortAccept(context.Background(), "A") {
+		t.Fatal("abort on a ringing call must succeed")
+	}
+	if !r.IsEnded() {
+		t.Fatal("aborted call must be ended")
+	}
+
+	// Already accepted: abort is a no-op and must not end the live call.
+	m2 := newTestManager(t, newFakeSocket(), newFakeRelay(), &passthroughCodec{})
+	a := NewIncomingCall("B", "peer@lid", "creator@lid", "", core.CallMediaTypeAudio)
+	if err := a.ApplyTransition(Transition{Type: TransitionLocalAccepted}); err != nil {
+		t.Fatal(err)
+	}
+	m2.currentCall = a
+	if m2.AbortAccept(context.Background(), "B") {
+		t.Fatal("abort on an already-accepted call must be a no-op")
+	}
+	if a.IsEnded() {
+		t.Fatal("abort must not end an accepted call")
+	}
+}

@@ -257,6 +257,38 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 	return nil
 }
 
+// AbortAccept rolls back a failed accept, but only if the call is STILL
+// acceptable (ringing). If another accept already won the race, it is a no-op
+// and reports false so the caller does not tear down the now-live call.
+func (m *CallManager) AbortAccept(ctx context.Context, callID string) bool {
+	m.mu.Lock()
+	call := m.currentCall
+	if call == nil || call.CallID != callID || call.IsEnded() || !call.CanAccept() {
+		m.mu.Unlock()
+		return false
+	}
+	_ = call.ApplyTransition(Transition{Type: TransitionTerminated, Reason: core.EndCallReasonUserEnded})
+	termDest := call.PeerJid
+	if m.acceptedByJid != "" {
+		termDest = m.acceptedByJid
+	}
+	node := signaling.BuildTerminateStanza(wanode.MustJID(termDest), call.CallID, wanode.MustJID(call.CallCreator))
+	ended := call
+	m.emitState()
+	m.mu.Unlock()
+
+	go func() {
+		sendCtx, cancel := detachedSendContext(ctx)
+		defer cancel()
+		_, _ = m.sock.Query(sendCtx, node)
+	}()
+	if m.OnEnded != nil {
+		m.OnEnded(ended)
+	}
+	m.cleanupMedia()
+	return true
+}
+
 // CanAcceptID reports whether callID is an inbound call currently in a state
 // that can be accepted (used to reject stray accepts without tearing down an
 // outbound/live call).
