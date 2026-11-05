@@ -34,7 +34,7 @@ type CallManager struct {
 	initialTransportSent  bool
 	outgoingPreacceptSent bool
 	acceptedByJid         string
-	accepting             bool
+	acceptingCallID       string
 	calleeDevices         []types.JID
 	debeEnabled           bool
 
@@ -217,11 +217,11 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 		m.mu.Unlock()
 		return &CallError{"call cannot be accepted in state " + string(call.StateData.State)}
 	}
-	if m.accepting {
+	if m.acceptingCallID == callID {
 		m.mu.Unlock()
 		return &CallError{"accept already in progress"}
 	}
-	m.accepting = true
+	m.acceptingCallID = callID
 	key := call.EncryptionKey
 	peer := wanode.MustJID(call.PeerJid)
 	creator := wanode.MustJID(call.CallCreator)
@@ -229,9 +229,20 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 	relayData := call.RelayData
 	m.mu.Unlock()
 
+	// Always release the in-flight marker, even if a send panics.
+	defer func() {
+		m.mu.Lock()
+		if m.acceptingCallID == callID {
+			m.acceptingCallID = ""
+		}
+		m.mu.Unlock()
+	}()
+
 	fail := func(err error) error {
 		m.mu.Lock()
-		m.accepting = false
+		if m.acceptingCallID == callID {
+			m.acceptingCallID = ""
+		}
 		m.mu.Unlock()
 		return err
 	}
@@ -251,7 +262,9 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 	}
 
 	m.mu.Lock()
-	m.accepting = false
+	if m.acceptingCallID == callID {
+		m.acceptingCallID = ""
+	}
 	// Re-check under the lock: the call may have ended/changed during send.
 	if m.currentCall != call || call.IsEnded() || !call.CanAccept() {
 		m.mu.Unlock()
@@ -271,16 +284,28 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 	return nil
 }
 
-// AbortAccept rolls back a failed accept, but only if the call is STILL
-// acceptable (ringing) and no other accept is in flight. If another accept
-// already won the race, it is a no-op and reports false so the caller does not
-// tear down the now-live call.
-func (m *CallManager) AbortAccept(ctx context.Context, callID string) bool {
+// AbortAccept rolls back a failed accept. It aborts (ends) the call only when
+// it is still ringing and no accept for it is in flight. It reports whether it
+// aborted, and whether the call is already accepted (a concurrent accept won).
+func (m *CallManager) AbortAccept(ctx context.Context, callID string) (aborted, accepted bool) {
 	m.mu.Lock()
 	call := m.currentCall
-	if m.accepting || call == nil || call.CallID != callID || call.IsEnded() || !call.CanAccept() {
+	if m.acceptingCallID == callID {
 		m.mu.Unlock()
-		return false
+		return false, false
+	}
+	if call == nil || call.CallID != callID {
+		m.mu.Unlock()
+		return false, false
+	}
+	if call.IsEnded() {
+		m.mu.Unlock()
+		return false, false
+	}
+	if !call.CanAccept() {
+		// Past ringing but not ended => another accept already won.
+		m.mu.Unlock()
+		return false, true
 	}
 	_ = call.ApplyTransition(Transition{Type: TransitionTerminated, Reason: core.EndCallReasonUserEnded})
 	termDest := call.PeerJid
@@ -301,7 +326,7 @@ func (m *CallManager) AbortAccept(ctx context.Context, callID string) bool {
 		m.OnEnded(ended)
 	}
 	m.cleanupMedia()
-	return true
+	return true, false
 }
 
 // AbortAccept rolls back a failed accept, but only if the call is STILL

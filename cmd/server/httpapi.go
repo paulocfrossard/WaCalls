@@ -448,18 +448,14 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 	if err := ac.cm.AcceptCall(r.Context(), id); err != nil {
 		// AbortAccept is atomic: it rolls back only if the call is still
 		// ringing, so a concurrent accept that already won is never torn down.
-		if ac.cm.AbortAccept(r.Context(), id) {
+		aborted, accepted := ac.cm.AbortAccept(r.Context(), id)
+		if aborted {
 			sess.removeCall(id)
 			s.broker.endCall(id, string(core.EndCallReasonUserEnded))
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		// AbortAccept was a no-op: either another accept is in flight/won, or
-		// the call is already gone. Only clean up the claim in the latter case.
-		if !ac.cm.CanAcceptID(id) && !ac.cm.AlreadyAccepted(id) {
-			sess.removeCall(id)
-			s.broker.endCall(id, string(core.EndCallReasonUserEnded))
-		}
+		_ = accepted // another accept won or is in flight: do not tear down
 		writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": id}})
 		return
 	}

@@ -47,7 +47,7 @@ func TestAbortAcceptOnlyAbortsRinging(t *testing.T) {
 	m := newTestManager(t, newFakeSocket(), newFakeRelay(), &passthroughCodec{})
 	r := NewIncomingCall("A", "peer@lid", "creator@lid", "", core.CallMediaTypeAudio)
 	m.currentCall = r
-	if !m.AbortAccept(context.Background(), "A") {
+	if aborted, _ := m.AbortAccept(context.Background(), "A"); !aborted {
 		t.Fatal("abort on a ringing call must succeed")
 	}
 	if !r.IsEnded() {
@@ -61,8 +61,8 @@ func TestAbortAcceptOnlyAbortsRinging(t *testing.T) {
 		t.Fatal(err)
 	}
 	m2.currentCall = a
-	if m2.AbortAccept(context.Background(), "B") {
-		t.Fatal("abort on an already-accepted call must be a no-op")
+	if aborted, accepted := m2.AbortAccept(context.Background(), "B"); aborted || !accepted {
+		t.Fatalf("abort on an already-accepted call must report accepted only: aborted=%v accepted=%v", aborted, accepted)
 	}
 	if a.IsEnded() {
 		t.Fatal("abort must not end an accepted call")
