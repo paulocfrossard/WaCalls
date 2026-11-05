@@ -64,6 +64,39 @@ firefox 0.0.0.0:5176
 
 Done!
 
+### Production deployment (hardened)
+
+The bridge above (`-p 5176:8080`) only maps TCP: the browser-leg WebRTC/DTLS
+runs over **UDP**, so under Docker's default bridge network the peer candidates
+point at the container IP and calls fail to negotiate. Use host networking (or
+macvlan) and cap resources:
+
+```bash
+docker run -d \
+  --network host \
+  --name wecalls \
+  --restart=always \
+  --cpus=4 --memory=4g \
+  --ulimit nofile=65535:65535 \
+  --log-opt max-size=50m --log-opt max-file=5 \
+  -e GOGC=200 -e GOMEMLIMIT=3GiB \
+  -v /var/lib/wacalls:/data \
+  caedpaulofrossard/wacalls:debian \
+  /wacalls -static /opt/client/dist -addr :6060 -db /data/wacalls.db -max-total-calls=16
+```
+
+- **Firewall:** the Go process binds OS-assigned ephemeral UDP ports for ICE;
+  allow LAN → host on the ephemeral range and outbound UDP `3478` (WhatsApp
+  relay). There is no `SettingEngine` port range pinned in code yet.
+- **Logs:** `--log-opt` bounds the Docker json-file driver; the server logs
+  JSON to stderr (`slog.NewJSONHandler`). Keep `-debug-log` **off** (default)
+  in production — enable it only while diagnosing audio.
+- **GOGC / GOMEMLIMIT:** bound GC so N calls do not thrash; set
+  `GOMEMLIMIT` ≈ 80% of `--memory`.
+- **Graceful shutdown:** on SIGTERM the server stops admitting new calls,
+  ends all calls and waits up to 3 s for terminate stanzas before exiting.
+  Give the container at least a 10 s stop grace period.
+
 ---
 
 ## Fork data
