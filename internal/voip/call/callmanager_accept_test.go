@@ -93,3 +93,22 @@ func TestAbortAcceptReportsGone(t *testing.T) {
 		t.Fatal("ended call must report gone")
 	}
 }
+
+func TestAbortAcceptInFlightVsGone(t *testing.T) {
+	// In-flight accept on a ringing call: (false,false,false).
+	m := newTestManager(t, newFakeSocket(), newFakeRelay(), &passthroughCodec{})
+	ring := NewIncomingCall("A", "peer@lid", "creator@lid", "", core.CallMediaTypeAudio)
+	m.currentCall = ring
+	m.acceptingCallID = "A"
+	if a, acc, g := m.AbortAccept(context.Background(), "A"); a || acc || g {
+		t.Fatalf("in-flight ringing should be (false,false,false), got %v %v %v", a, acc, g)
+	}
+
+	// Ended call while an accept is in flight: gone wins over in-flight.
+	if err := ring.ApplyTransition(Transition{Type: TransitionTerminated, Reason: core.EndCallReasonUserEnded}); err != nil {
+		t.Fatal(err)
+	}
+	if a, acc, g := m.AbortAccept(context.Background(), "A"); a || acc || !g {
+		t.Fatalf("ended call must report gone even with marker set, got %v %v %v", a, acc, g)
+	}
+}

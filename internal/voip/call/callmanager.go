@@ -290,7 +290,8 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 
 // AbortAccept rolls back a failed accept. It aborts (ends) the call only when
 // it is still ringing and no accept for it is in flight. It reports whether it
-// aborted, and whether the call is already accepted (a concurrent accept won).
+// aborted, whether another accept already won (accepted), and whether the call
+// is already gone/ended (gone) so the caller can release the claim.
 func (m *CallManager) AbortAccept(ctx context.Context, callID string) (aborted, accepted, gone bool) {
 	m.mu.Lock()
 	call := m.currentCall
@@ -333,10 +334,6 @@ func (m *CallManager) AbortAccept(ctx context.Context, callID string) (aborted, 
 	m.cleanupMedia()
 	return true, false, false
 }
-
-// AbortAccept rolls back a failed accept, but only if the call is STILL
-// acceptable (ringing). If another accept already won the race, it is a no-op
-// and reports false so the caller does not tear down the now-live call.
 
 // CanAcceptID reports whether callID is an inbound call currently in a state
 // that can be accepted (used to reject stray accepts without tearing down an
