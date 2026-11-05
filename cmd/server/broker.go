@@ -87,10 +87,18 @@ func (s *subscriber) wantsEvent(ev any) bool {
 	return true
 }
 
+// callKey identifies a call by session and call id. Two different sessions
+// must never share a slot (an inbound WhatsApp call id could in principle be
+// reused across accounts), so the composite key is the map key.
+type callKey struct {
+	sessionID string
+	callID    string
+}
+
 type Broker struct {
 	mu            sync.RWMutex
 	subs          map[*subscriber]struct{}
-	calls         map[string]*CallRecord
+	calls         map[callKey]*CallRecord
 	history       []CallRecord
 	maxTotalCalls int
 	totalActive   int
@@ -107,7 +115,7 @@ type Broker struct {
 func NewBroker() *Broker {
 	return &Broker{
 		subs:  map[*subscriber]struct{}{},
-		calls: map[string]*CallRecord{},
+		calls: map[callKey]*CallRecord{},
 	}
 }
 
@@ -252,7 +260,7 @@ func (b *Broker) emitSessionQR(sessionID, qr string) {
 func (b *Broker) upsertCall(r CallRecord) {
 	b.mu.Lock()
 	cp := r
-	b.calls[r.CallID] = &cp
+	b.calls[callKey{r.SessionID, r.CallID}] = &cp
 	b.mu.Unlock()
 	b.broadcastCallList()
 	b.broadcast(map[string]any{
@@ -261,10 +269,10 @@ func (b *Broker) upsertCall(r CallRecord) {
 	})
 }
 
-func (b *Broker) getCall(id string) (*CallRecord, bool) {
+func (b *Broker) getCall(sessionID, callID string) (*CallRecord, bool) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	c, ok := b.calls[id]
+	c, ok := b.calls[callKey{sessionID, callID}]
 	if !ok {
 		return nil, false
 	}
@@ -272,10 +280,10 @@ func (b *Broker) getCall(id string) (*CallRecord, bool) {
 	return &cp, true
 }
 
-func (b *Broker) setOwner(id, owner string) bool {
+func (b *Broker) setOwner(sessionID, callID, owner string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	c, ok := b.calls[id]
+	c, ok := b.calls[callKey{sessionID, callID}]
 	if !ok {
 		return false
 	}
@@ -290,10 +298,10 @@ func (b *Broker) setOwner(id, owner string) bool {
 // no owner yet, or it is already owned by owner. Unlike setOwner it does not
 // claim an unowned call, so only an existing owner (or a never-claimed call)
 // can reject/end it.
-func (b *Broker) isOwnerOrUnclaimed(id, owner string) bool {
+func (b *Broker) isOwnerOrUnclaimed(sessionID, callID, owner string) bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	c, ok := b.calls[id]
+	c, ok := b.calls[callKey{sessionID, callID}]
 	if !ok {
 		return true
 	}
@@ -303,23 +311,26 @@ func (b *Broker) isOwnerOrUnclaimed(id, owner string) bool {
 	return *c.Owner == owner
 }
 
-func (b *Broker) ownerActiveCall(owner string) string {
+// ownerActiveCall reports the (sessionID, callID) of the call the owner
+// currently holds, if any.
+func (b *Broker) ownerActiveCall(owner string) (string, string, bool) {
 	if owner == "" {
-		return ""
+		return "", "", false
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	for id, c := range b.calls {
+	for k, c := range b.calls {
 		if c.Owner != nil && *c.Owner == owner && c.Status != StatusEnded {
-			return id
+			return k.sessionID, k.callID, true
 		}
 	}
-	return ""
+	return "", "", false
 }
 
-func (b *Broker) endCall(id, reason string) {
+func (b *Broker) endCall(sessionID, callID, reason string) {
 	b.mu.Lock()
-	c, ok := b.calls[id]
+	key := callKey{sessionID, callID}
+	c, ok := b.calls[key]
 	if !ok {
 		b.mu.Unlock()
 		return
@@ -329,16 +340,16 @@ func (b *Broker) endCall(id, reason string) {
 	c.EndedAt = &now
 	c.EndReason = reason
 	ended := *c
-	delete(b.calls, id)
+	delete(b.calls, key)
 	b.history = append(b.history, ended)
 	owner := c.Owner
-	sessionID := c.SessionID
+	sid := c.SessionID
 	peer := ended.Peer
 	direction := ended.Direction
 	b.mu.Unlock()
 
 	b.broadcast(map[string]any{
-		"type": "call-ended", "sessionId": sessionID, "id": id, "owner": owner,
+		"type": "call-ended", "sessionId": sid, "id": callID, "owner": owner,
 		"peer": peer, "direction": direction, "reason": reason, "endedAt": now,
 	})
 	b.broadcastCallList()

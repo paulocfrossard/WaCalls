@@ -323,7 +323,7 @@ func (s *server) doStartCall(sess *Session, w http.ResponseWriter, r *http.Reque
 		return
 	}
 	owner := clientID(r)
-	if other := s.broker.ownerActiveCall(owner); other != "" {
+	if _, _, ok := s.broker.ownerActiveCall(owner); ok {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call"})
 		return
 	}
@@ -368,11 +368,11 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 		return
 	}
 	owner := clientID(r)
-	if other := s.broker.ownerActiveCall(owner); other != "" && other != callID {
+	if osid, oid, ok := s.broker.ownerActiveCall(owner); ok && !(osid == sess.id && oid == callID) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call"})
 		return
 	}
-	if !s.broker.setOwner(callID, owner) {
+	if !s.broker.setOwner(sess.id, callID, owner) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
 		return
 	}
@@ -380,7 +380,7 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 	bridge, answer, err := s.newBridge(body.SDPOffer, s.log)
 	if err != nil {
 		sess.removeCall(callID)
-		s.broker.endCall(callID, string(core.EndCallReasonUserEnded))
+		s.broker.endCall(sess.id, callID, string(core.EndCallReasonUserEnded))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -390,7 +390,7 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 	// (two bridges surviving setBridge) is a duplication path.
 	logbuf.LogEvent("webrtc-assign", logbuf.LevelInfo, "OnBrowserPCM assigned", map[string]any{
 		"call_id": callID, "session_id": sess.id, "peer": func() string {
-			if rec, ok := s.broker.getCall(callID); ok {
+			if rec, ok := s.broker.getCall(sess.id, callID); ok {
 				return maskPeer(rec.Peer)
 			}
 			return "unknown"
@@ -428,18 +428,18 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 	// outbound/live call must not claim or tear it down.
 	if !ac.cm.CanAcceptID(id) {
 		// Retry by the owner of an already-accepted call is a no-op.
-		if ac.cm.AlreadyAccepted(id) && s.broker.isOwnerOrUnclaimed(id, owner) {
+		if ac.cm.AlreadyAccepted(id) && s.broker.isOwnerOrUnclaimed(sess.id, id, owner) {
 			writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": id}})
 			return
 		}
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "call is not in an acceptable state"})
 		return
 	}
-	if other := s.broker.ownerActiveCall(owner); other != "" && other != id {
+	if osid, oid, ok := s.broker.ownerActiveCall(owner); ok && !(osid == sess.id && oid == id) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call"})
 		return
 	}
-	if !s.broker.setOwner(id, owner) {
+	if !s.broker.setOwner(sess.id, id, owner) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
 		return
 	}
@@ -452,13 +452,13 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 		switch {
 		case aborted:
 			sess.removeCall(id)
-			s.broker.endCall(id, string(core.EndCallReasonUserEnded))
+			s.broker.endCall(sess.id, id, string(core.EndCallReasonUserEnded))
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		case gone:
 			// The call ended meanwhile: release the claim/registry slot.
 			sess.removeCall(id)
-			s.broker.endCall(id, string(core.EndCallReasonUserEnded))
+			s.broker.endCall(sess.id, id, string(core.EndCallReasonUserEnded))
 		case accepted:
 			// Another accept won the race; keep its live call untouched.
 		}
@@ -478,13 +478,13 @@ func (s *server) doReject(sess *Session, w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
 		return
 	}
-	if !s.broker.isOwnerOrUnclaimed(id, owner) {
+	if !s.broker.isOwnerOrUnclaimed(sess.id, id, owner) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
 		return
 	}
 	_ = ac.cm.RejectCall(r.Context(), id, core.EndCallReasonDeclined)
 	sess.removeCall(id)
-	s.broker.endCall(id, string(core.EndCallReasonDeclined))
+	s.broker.endCall(sess.id, id, string(core.EndCallReasonDeclined))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -497,13 +497,13 @@ func (s *server) doEndCall(sess *Session, w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
 		return
 	}
-	if !s.broker.isOwnerOrUnclaimed(id, owner) {
+	if !s.broker.isOwnerOrUnclaimed(sess.id, id, owner) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
 		return
 	}
 	_ = ac.cm.EndCallForID(r.Context(), id, core.EndCallReasonUserEnded)
 	sess.removeCall(id)
-	s.broker.endCall(id, string(core.EndCallReasonUserEnded))
+	s.broker.endCall(sess.id, id, string(core.EndCallReasonUserEnded))
 	w.WriteHeader(http.StatusNoContent)
 }
 

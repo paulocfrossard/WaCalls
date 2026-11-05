@@ -277,7 +277,7 @@ func TestWebhookEventsSubsetFilterEndToEnd(t *testing.T) {
 		SessionID: "sess_1", CallID: "call_1", Direction: "inbound",
 		Peer: "551199999999", StartedAt: time.Now().UnixMilli(), Status: StatusRinging,
 	})
-	b.endCall("call_1", "busy")
+	b.endCall("sess_1", "call_1", "busy")
 
 	// Expect exactly: A gets 1 (incoming only); B gets 3 (all).
 	deadline := time.After(3 * time.Second)
@@ -331,7 +331,7 @@ func TestCallEndedWebhookCarriesPeerAndDirection(t *testing.T) {
 		SessionID: "s1", CallID: "c1", Owner: &owner, Direction: "inbound",
 		Peer: "551188887777", StartedAt: time.Now().UnixMilli(), Status: StatusConnected,
 	})
-	b.endCall("c1", "user-hangup")
+	b.endCall("s1", "c1", "user-hangup")
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {

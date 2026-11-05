@@ -75,14 +75,14 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 	cm.OnStateChange = func(c *call.CallInfo) {
 		if c.IsEnded() {
 			s.removeCall(c.CallID)
-			s.mgr.broker.endCall(c.CallID, string(c.StateData.EndReason))
+			s.mgr.broker.endCall(s.id, c.CallID, string(c.StateData.EndReason))
 			return
 		}
 		dir := "outbound"
 		if c.Direction == core.CallDirectionIncoming {
 			dir = "inbound"
 		}
-		existing, _ := s.mgr.broker.getCall(c.CallID)
+		existing, _ := s.mgr.broker.getCall(s.id, c.CallID)
 		rec := CallRecord{
 			SessionID: s.id, CallID: c.CallID, Direction: dir, Peer: c.PeerJid,
 			StartedAt: time.Now().UnixMilli(), Status: mapStatus(c.StateData.State),
@@ -95,7 +95,7 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 	}
 	cm.OnEnded = func(c *call.CallInfo) {
 		s.removeCall(c.CallID)
-		s.mgr.broker.endCall(c.CallID, string(c.StateData.EndReason))
+		s.mgr.broker.endCall(s.id, c.CallID, string(c.StateData.EndReason))
 	}
 	cm.OnPeerAudio = func(pcm16 []float32) {
 		owner, br, ok := s.reg.getWithBridge(callID)
@@ -321,7 +321,7 @@ func (s *Session) setBridge(callID string, b *Bridge) {
 		return
 	}
 	peer := "unknown"
-	if rec, ok := s.mgr.broker.getCall(callID); ok {
+	if rec, ok := s.mgr.broker.getCall(s.id, callID); ok {
 		peer = maskPeer(rec.Peer)
 	}
 	logbuf.LogEvent("bridge", logbuf.LevelInfo, "setBridge: bridge attached", map[string]any{

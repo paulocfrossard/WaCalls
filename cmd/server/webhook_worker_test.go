@@ -192,7 +192,7 @@ func TestBrokerDispatchesWebhookEvents(t *testing.T) {
 		SessionID: "sess_1", CallID: "call_1", Direction: "inbound",
 		Peer: "551199999999", StartedAt: time.Now().UnixMilli(), Status: StatusRinging,
 	})
-	b.endCall("call_1", "busy")
+	b.endCall("sess_1", "call_1", "busy")
 
 	deadline := time.Now().Add(2 * time.Second)
 	for attempts.Load() < 3 && time.Now().Before(deadline) {
@@ -221,7 +221,7 @@ func TestWebhookDispatcherNilIsSafe(t *testing.T) {
 	// No dispatcher wired: broadcast must not panic.
 	b.emitIncoming("s", "c", "p")
 	b.upsertCall(CallRecord{SessionID: "s", CallID: "c", Status: StatusRinging})
-	b.endCall("c", "done")
+	b.endCall("s", "c", "done")
 }
 
 func TestWebhookDeliveryIDStableAcrossRetries(t *testing.T) {
