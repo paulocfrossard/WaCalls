@@ -4,6 +4,7 @@ import { SdkRequestError } from "wacalls-sdk";
 import { sdkClient } from "@/lib/sdk-client";
 import { notifySdkCallChanged } from "@/hooks/useSdkCall";
 import { removeIncoming } from "@/stores/calls";
+import { sdkErrorCode } from "@/lib/sdk-client";
 
 export const useAcceptCall = () =>
   useMutation({
@@ -31,12 +32,12 @@ export const useAcceptCall = () =>
     },
     onError: (e: Error, vars: { sid: string; callId: string }) => {
       if (e instanceof SdkRequestError && e.status === 409) {
-        // The server distinguishes three 409s. Only "operator already on a
-        // call" leaves the ringing call unclaimed — keep it queued so the
-        // operator can retry after ending the current call. The other two
-        // (claimed by another client / not in an acceptable state) mean this
-        // operator can no longer act on the call: drop it from the queue.
-        if (e.body.includes("operator already on a call")) {
+        // The server distinguishes three 409s by machine-readable `code`.
+        // Only operator_busy leaves the ringing call unclaimed — keep it
+        // queued so the operator can retry after ending the current call.
+        // call_claimed / not_acceptable mean this operator can no longer act
+        // on the call: drop it from the queue.
+        if (sdkErrorCode(e) === "operator_busy") {
           toast.error("You are already on a call");
           return;
         }

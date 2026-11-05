@@ -326,15 +326,15 @@ func (s *server) doStartCall(sess *Session, w http.ResponseWriter, r *http.Reque
 	}
 	owner := clientID(r)
 	if _, _, ok := s.broker.ownerActiveCall(owner); ok {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call", "code": "operator_busy"})
 		return
 	}
 	if max := s.sessions.maxCalls; max > 0 && sess.reg.count() >= max {
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "max concurrent calls"})
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "max concurrent calls", "code": "session_limit"})
 		return
 	}
 	if !s.broker.tryAdmit() {
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "max total calls"})
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "max total calls", "code": "global_limit"})
 		return
 	}
 	peer := types.NewJID(normalizePhone(body.Phone), types.DefaultUserServer)
@@ -371,11 +371,11 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 	}
 	owner := clientID(r)
 	if osid, oid, ok := s.broker.ownerActiveCall(owner); ok && !(osid == sess.id && oid == callID) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call", "code": "operator_busy"})
 		return
 	}
 	if !s.broker.setOwner(sess.id, callID, owner) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client", "code": "call_claimed"})
 		return
 	}
 	s.broker.broadcastCallList()
@@ -434,15 +434,15 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 			writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": id}})
 			return
 		}
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "call is not in an acceptable state"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "call is not in an acceptable state", "code": "not_acceptable"})
 		return
 	}
 	if osid, oid, ok := s.broker.ownerActiveCall(owner); ok && !(osid == sess.id && oid == id) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call", "code": "operator_busy"})
 		return
 	}
 	if !s.broker.setOwner(sess.id, id, owner) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client", "code": "call_claimed"})
 		return
 	}
 	s.broker.broadcastCallList()
@@ -481,7 +481,7 @@ func (s *server) doReject(sess *Session, w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !s.broker.isOwnerOrUnclaimed(sess.id, id, owner) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client", "code": "call_claimed"})
 		return
 	}
 	_ = ac.cm.RejectCall(r.Context(), id, core.EndCallReasonDeclined)
@@ -500,7 +500,7 @@ func (s *server) doEndCall(sess *Session, w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !s.broker.isOwnerOrUnclaimed(sess.id, id, owner) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client", "code": "call_claimed"})
 		return
 	}
 	_ = ac.cm.EndCallForID(r.Context(), id, core.EndCallReasonUserEnded)

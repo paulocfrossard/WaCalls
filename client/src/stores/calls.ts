@@ -26,12 +26,16 @@ export const ensureCallsWired = (): void => {
   sdkClient.on("call:incoming", (p) => {
     useCalls.setState((s) => {
       const offeredAt = p.offeredAt ?? Date.now();
-      // Dedupe by (callId, offeredAt): a re-sent offer (SSE reconnect replay)
-      // keeps the original timestamp AND the same queue entry, so the ring
-      // loop isn't restarted by a duplicate frame.
-      if (s.incoming.some((c) => c.callId === p.callId && c.offeredAt === offeredAt)) return s;
-      // Drop any stale entry for the same callId (re-offer with new timestamp).
-      const next = s.incoming.filter((c) => c.callId !== p.callId);
+      // Identity is (sessionId, callId): two sessions can surface the same
+      // WhatsApp call id, so a re-offer must not wipe the other session's row.
+      const same = (c: { sessionId: string; callId: string }) =>
+        c.sessionId === p.sessionId && c.callId === p.callId;
+      // Dedupe by (sessionId, callId, offeredAt): a re-sent offer (SSE
+      // reconnect replay) keeps the original timestamp AND the same queue
+      // entry, so the ring loop isn't restarted by a duplicate frame.
+      if (s.incoming.some((c) => same(c) && c.offeredAt === offeredAt)) return s;
+      // Drop any stale entry for the same call (re-offer with new timestamp).
+      const next = s.incoming.filter((c) => !same(c));
       next.push({ sessionId: p.sessionId, callId: p.callId, peer: p.peer, offeredAt });
       next.sort((a, b) => a.offeredAt - b.offeredAt);
       return { incoming: next };
@@ -40,7 +44,9 @@ export const ensureCallsWired = (): void => {
 
   sdkClient.on("call:status", (p) => {
     useCalls.setState((s) => {
-      const row = s.calls.find((c) => c.callId === p.callId);
+      const row = s.calls.find(
+        (c) => c.callId === p.callId && c.sessionId === p.sessionId,
+      );
       // Short-circuit on no-op updates (SSE snapshot replay): returning the
       // same state object makes zustand skip the notify (no re-render).
       // `!row` too: a status frame for an unknown call changes nothing (the
@@ -56,7 +62,7 @@ export const ensureCallsWired = (): void => {
       }
       return {
         calls: s.calls.map((c) =>
-          c.callId === p.callId
+          c.callId === p.callId && c.sessionId === p.sessionId
             ? {
                 ...c,
                 sessionId: p.sessionId,

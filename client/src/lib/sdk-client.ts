@@ -1,4 +1,4 @@
-import { WaCallsClient } from "wacalls-sdk";
+import { SdkRequestError, WaCallsClient } from "wacalls-sdk";
 import { getClientId } from "@/lib/client-id";
 import { useDevices } from "@/stores/devices";
 import { BASE_URL_STORAGE_KEY, resolveBaseUrl } from "@/lib/base";
@@ -17,6 +17,21 @@ export const sdkClient = new WaCallsClient({
 
 export function reconfigureSdk(baseUrl: string): void {
   sdkClient.setBaseUrl(baseUrl);
+}
+
+/**
+ * Extracts the machine-readable `code` from an SdkRequestError body
+ * ({"error":"...","code":"operator_busy"}). Returns undefined for non-SDK
+ * errors or bodies without a code — callers must then fall back to `status`.
+ */
+export function sdkErrorCode(err: unknown): string | undefined {
+  if (!(err instanceof SdkRequestError)) return undefined;
+  try {
+    const parsed = JSON.parse(err.body) as { code?: unknown };
+    return typeof parsed.code === "string" ? parsed.code : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 if (typeof window !== "undefined") {

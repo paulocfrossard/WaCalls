@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { SdkRequestError } from "wacalls-sdk";
 import { sdkClient } from "@/lib/sdk-client";
 import { notifySdkCallChanged } from "@/hooks/useSdkCall";
+import { sdkErrorCode } from "@/lib/sdk-client";
 
 export const useStartCall = (sid: string) =>
   useMutation({
@@ -15,13 +16,16 @@ export const useStartCall = (sid: string) =>
       // Classify on the HTTP status (the raw message embeds the whole
       // "METHOD path status body" string, so substring matching is brittle).
       if (e instanceof SdkRequestError) {
+        const code = sdkErrorCode(e);
         if (e.status === 409) {
-          toast.error("You are already on a call");
+          toast.error(
+            code === "call_claimed" ? "Call claimed by another client" : "You are already on a call",
+          );
           return;
         }
         if (e.status === 429) {
           toast.error(
-            e.body.includes("max total")
+            code === "global_limit"
               ? "Server call limit reached."
               : "Limit reached: max concurrent calls.",
           );
