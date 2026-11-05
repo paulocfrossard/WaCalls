@@ -98,6 +98,8 @@ export const ensureCallsWired = (): void => {
     });
     if (ended) {
       queryClient.setQueryData<HistoryRow[]>(["history", p.sessionId], (rows) => {
+        // The cache key is already session-scoped (["history", p.sessionId]),
+        // so callId alone is a sufficient identity inside it.
         if (!rows || rows.some((r) => r.callId === p.callId)) return rows;
         return [
           {

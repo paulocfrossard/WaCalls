@@ -32,16 +32,16 @@ export const useAcceptCall = () =>
     },
     onError: (e: Error, vars: { sid: string; callId: string }) => {
       if (e instanceof SdkRequestError && e.status === 409) {
-        // The server distinguishes three 409s by machine-readable `code`.
-        // Only operator_busy leaves the ringing call unclaimed — keep it
-        // queued so the operator can retry after ending the current call.
-        // call_claimed / not_acceptable mean this operator can no longer act
-        // on the call: drop it from the queue.
-        if (sdkErrorCode(e) === "operator_busy") {
-          toast.error("You are already on a call");
+        // Whitelist-drop: only a known terminal code removes the ringing
+        // entry. operator_busy (and any unparsable/unknown body) keeps it —
+        // a stale entry self-heals via the owner-scoped call-list prune,
+        // while a wrongly dropped ring can never come back.
+        const code = sdkErrorCode(e);
+        if (code === "call_claimed" || code === "not_acceptable") {
+          removeIncoming(vars.sid, vars.callId);
           return;
         }
-        removeIncoming(vars.sid, vars.callId);
+        toast.error(code === "operator_busy" ? "You are already on a call" : e.message);
         return;
       }
       toast.error(e.message);

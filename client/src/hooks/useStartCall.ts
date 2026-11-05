@@ -27,7 +27,9 @@ export const useStartCall = (sid: string) =>
           toast.error(
             code === "global_limit"
               ? "Server call limit reached."
-              : "Limit reached: max concurrent calls.",
+              : code === "session_limit"
+                ? "Limit reached: max concurrent calls."
+                : "Rate limited — try again shortly.",
           );
           return;
         }
