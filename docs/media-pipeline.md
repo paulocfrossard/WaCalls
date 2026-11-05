@@ -73,7 +73,7 @@ before acting; this module never re-decides them.
 
 ## Debugging the audio path
 
-- Server side: run with `-debug-log=true` (default) and tail
+- Server side: run with `-debug-log=true` (off by default) and tail
   `GET /api/debug/logs` (sources such as `bridge-uplink`, `bridge-downlink`) — or use
   the client **Debug** page (`pages/DebugPage.tsx`), which polls the same endpoint.
 - Client side: `sdk/src/core/webrtc.ts` emits structured debug rows (gum, dc, ice, uplink,

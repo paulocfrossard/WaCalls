@@ -103,11 +103,14 @@ Imports use the `@/` alias → `client/src` (configured in `vite.config.ts`).
 - One goroutine model per call inside `CallManager`; the bridge pumps uplink/downlink
   over the data channel without the core knowing the transport (core only sees
   `[]float32` PCM).
-- Per-session call limit enforced at the HTTP layer (`-max-calls-per-session`, default 8).
+- Per-session call limit (`-max-calls-per-session`, default 8) and a global cap
+  (`-max-total-calls`, default 0 = unlimited) are enforced at the HTTP/admission layer.
 - Single-operator conflict: `X-Client-Id` (header or `?clientId=`) is **advisory**, used
-  only to refuse a second concurrent operator on the same session (409) — not a credential.
-- The SSE broker fans out per client id; clients reconnect with the same id to reduce
-  duplicate operator state.
+  to refuse a second concurrent call for the same operator (409) and to hide other
+  operators' calls from the SSE/`call-list` view — not a credential.
+- The SSE broker fans out per subscriber; `?sessions=a,b` scopes the stream, `call-list`
+  is filtered per owner, and `call-status`/`call-ended` are hidden from non-owners
+  (`incoming`/`incoming-claimed` stay visible so every operator can clear its ring).
 
 ## Where to go next
 

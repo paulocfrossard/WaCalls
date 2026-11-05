@@ -20,7 +20,7 @@ outside the LAN.
 | All `/api/*` routes | No auth, no rate limiting, CORS `Access-Control-Allow-Origin: *` | Create/delete sessions (WhatsApp accounts), place/receive/end calls, read call history and peer numbers |
 | `GET /api/events` (SSE) | No auth; needs a `clientId` (trivial to supply) | Real-time surveillance of session pairing, call lifecycle, peer metadata |
 | `POST/GET/DELETE /api/webhooks` | No auth (like all `/api`); lets any LAN caller register outbound webhook URLs | **Server-side request forgery (SSRF) egress**: the server will send signed POSTs to any http/https URL the caller supplies, including internal hosts (`http://10.x/...`), loopback services, and cloud metadata (`http://169.254.169.254/...`). Delivery is blind (no response body is echoed back to the API caller), so this is a side-effect/egress vector, not an exfiltration channel — but it can trigger internal actions and, if the receiver echoes data elsewhere, aid pivoting |
-| `GET /api/debug/logs` | No auth (`-debug-log`, default **on**) | Leak of call IDs, SSRCs, audio-level telemetry, ICE/DC states |
+| `GET /api/debug/logs` | No auth (`-debug-log`, default **off**) | Leak of call IDs, SSRCs, audio-level telemetry, ICE/DC states |
 | `GET /` static files | Only when `-static` dir exists | Low — serves the SPA bundle only |
 | `wacalls.db` (SQLite) | Filesystem | **WhatsApp session credentials (secrets).** Full account takeover of linked devices |
 

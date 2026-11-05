@@ -40,8 +40,9 @@ accounts the same way and switch between them in the sidebar. Sessions persist i
 | `-db` | `wacalls.db` | SQLite session database path |
 | `-static` | `client/dist` | Static client directory; served at `/` only if the directory exists |
 | `-debug` | `false` | Verbose logging (includes whatsmeow's internal log) |
-| `-debug-log` | `true` | Emit audio diagnostic events to the ring behind `GET /api/debug/logs` |
+| `-debug-log` | `false` | Emit audio diagnostic events to the ring behind `GET /api/debug/logs` |
 | `-max-calls-per-session` | `8` | Max concurrent calls per session (`0` = unlimited) |
+| `-max-total-calls` | `0` | Max concurrent calls across all sessions (`0` = unlimited) |
 | `-srtp-auth` | `true` | Verify the SRTP HMAC tag on receive (`false` = legacy no-verify) |
 
 ## Run the client in dev mode

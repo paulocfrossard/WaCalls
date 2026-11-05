@@ -218,8 +218,9 @@ go run ./cmd/server -static client/dist -addr :8080
 | `-db` | `wacalls.db` | SQLite session database path |
 | `-static` | `client/dist` | Static client directory (optional) |
 | `-debug` | `false` | Verbose logging (includes whatsmeow's internal log) |
-| `-debug-log` | `true` | Emit audio diagnostic events to the ring behind `GET /api/debug/logs` |
+| `-debug-log` | `false` | Emit audio diagnostic events to the ring behind `GET /api/debug/logs` |
 | `-max-calls-per-session` | `8` | Max concurrent calls per session (`0` = unlimited) |
+| `-max-total-calls` | `0` | Max concurrent calls across all sessions (`0` = unlimited) |
 | `-srtp-auth` | `true` | Verify the SRTP HMAC tag on receive (`false` = legacy no-verify) |
 | `-webhook-allow-hosts` | `""` | Comma-separated hostnames webhooks may target (`""` = any host) |
 
@@ -232,7 +233,8 @@ originating `sessionId`.
 
 | Method | Route | Purpose |
 |---|---|---|
-| `GET` | `/api/sessions` | List accounts (id, name, jid, status, paired) |
+| `GET` | `/api/sessions` | List accounts (`{"sessions":[{id,name,jid,state,paired}]}`) |
+| `GET` | `/api/sessions/{sid}` | Get one account |
 | `POST` | `/api/sessions` | Create an account and begin QR pairing |
 | `DELETE` | `/api/sessions/{sid}` | Log out and remove an account |
 | `POST` | `/api/sessions/{sid}/logout` | Disconnect an account (keep it for re-pairing) |
@@ -248,6 +250,9 @@ originating `sessionId`.
 | `GET` | `/api/webhooks` | List registered webhooks (secret omitted) |
 | `DELETE` | `/api/webhooks/{id}` | Remove a webhook |
 | `GET` | `/api/debug/logs` | In-memory diagnostic ring (`?since=&limit=`, limit cap 500) |
+| `GET` | `/healthz` | Liveness |
+| `GET` | `/readyz` | Readiness (`503` while draining) |
+| `GET` | `/api/stats` | Runtime/call stats (goroutines, fds, dropped SSE events) |
 
 ---
 
