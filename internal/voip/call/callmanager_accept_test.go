@@ -68,3 +68,28 @@ func TestAbortAcceptOnlyAbortsRinging(t *testing.T) {
 		t.Fatal("abort must not end an accepted call")
 	}
 }
+
+func TestAbortAcceptReportsGone(t *testing.T) {
+	m := newTestManager(t, newFakeSocket(), newFakeRelay(), &passthroughCodec{})
+
+	// nil currentCall -> gone
+	if _, _, gone := m.AbortAccept(context.Background(), "X"); !gone {
+		t.Fatal("nil current call must report gone")
+	}
+
+	// mismatched live call -> gone, and it must not be ended
+	live := NewIncomingCall("A", "peer@lid", "creator@lid", "", core.CallMediaTypeAudio)
+	m.currentCall = live
+	if _, _, gone := m.AbortAccept(context.Background(), "B"); !gone {
+		t.Fatal("mismatched id must report gone")
+	}
+	if live.IsEnded() {
+		t.Fatal("mismatched abort must not end the live call")
+	}
+
+	// ended call -> gone
+	_ = live.ApplyTransition(Transition{Type: TransitionTerminated, Reason: core.EndCallReasonUserEnded})
+	if _, _, gone := m.AbortAccept(context.Background(), "A"); !gone {
+		t.Fatal("ended call must report gone")
+	}
+}

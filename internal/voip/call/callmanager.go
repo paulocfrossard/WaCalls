@@ -229,10 +229,8 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 	relayData := call.RelayData
 	m.mu.Unlock()
 
-	peer := wanode.MustJID(peerJid)
-	creator := wanode.MustJID(creatorJid)
-
-	// Always release the in-flight marker, even if a send panics.
+	// Register the marker clear BEFORE any panic-capable call (MustJID/build/
+	// send), so a panic cannot leave the in-flight marker stuck.
 	defer func() {
 		m.mu.Lock()
 		if m.acceptingCallID == callID {
@@ -240,6 +238,9 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 		}
 		m.mu.Unlock()
 	}()
+
+	peer := wanode.MustJID(peerJid)
+	creator := wanode.MustJID(creatorJid)
 
 	fail := func(err error) error {
 		m.mu.Lock()
@@ -293,17 +294,15 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 func (m *CallManager) AbortAccept(ctx context.Context, callID string) (aborted, accepted, gone bool) {
 	m.mu.Lock()
 	call := m.currentCall
+	// Classify gone first so a call that ended/replaced while another accept
+	// was in flight still lets the caller release the claim.
+	if call == nil || call.CallID != callID || call.IsEnded() {
+		m.mu.Unlock()
+		return false, false, true
+	}
 	if m.acceptingCallID == callID {
 		m.mu.Unlock()
 		return false, false, false
-	}
-	if call == nil || call.CallID != callID {
-		m.mu.Unlock()
-		return false, false, true
-	}
-	if call.IsEnded() {
-		m.mu.Unlock()
-		return false, false, true
 	}
 	if !call.CanAccept() {
 		// Past ringing but not ended => another accept already won.
@@ -315,11 +314,14 @@ func (m *CallManager) AbortAccept(ctx context.Context, callID string) (aborted, 
 	if m.acceptedByJid != "" {
 		termDest = m.acceptedByJid
 	}
-	node := signaling.BuildTerminateStanza(wanode.MustJID(termDest), call.CallID, wanode.MustJID(call.CallCreator))
+	cid := call.CallID
+	creator := call.CallCreator
 	ended := call
 	m.emitState()
 	m.mu.Unlock()
 
+	// Build the stanza OUTSIDE the lock (MustJID must not panic under m.mu).
+	node := signaling.BuildTerminateStanza(wanode.MustJID(termDest), cid, wanode.MustJID(creator))
 	go func() {
 		sendCtx, cancel := detachedSendContext(ctx)
 		defer cancel()
@@ -379,10 +381,14 @@ func (m *CallManager) RejectCall(ctx context.Context, callID string, reason core
 		return &CallError{"no call with id " + callID}
 	}
 	_ = call.ApplyTransition(Transition{Type: TransitionLocalRejected, Reason: reason})
-	node := signaling.BuildRejectStanza(wanode.MustJID(call.PeerJid), call.CallID, wanode.MustJID(call.CallCreator))
+	peerJid := call.PeerJid
+	cid := call.CallID
+	creator := call.CallCreator
 	m.emitState()
 	m.mu.Unlock()
 
+	// Build the stanza outside the lock (MustJID must not panic under m.mu).
+	node := signaling.BuildRejectStanza(wanode.MustJID(peerJid), cid, wanode.MustJID(creator))
 	go func() {
 		sendCtx, cancel := detachedSendContext(ctx)
 		defer cancel()
@@ -420,11 +426,14 @@ func (m *CallManager) endCall(ctx context.Context, expectID string, reason core.
 	if m.acceptedByJid != "" {
 		termDest = m.acceptedByJid
 	}
-	node := signaling.BuildTerminateStanza(wanode.MustJID(termDest), call.CallID, wanode.MustJID(call.CallCreator))
+	cid := call.CallID
+	creator := call.CallCreator
 	ended := call
 	m.emitState()
 	m.mu.Unlock()
 
+	// Build the stanza outside the lock (MustJID must not panic under m.mu).
+	node := signaling.BuildTerminateStanza(wanode.MustJID(termDest), cid, wanode.MustJID(creator))
 	go func() {
 		sendCtx, cancel := detachedSendContext(ctx)
 		defer cancel()

@@ -449,18 +449,18 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 		// AbortAccept is atomic: it rolls back only if the call is still
 		// ringing, so a concurrent accept that already won is never torn down.
 		aborted, accepted, gone := ac.cm.AbortAccept(r.Context(), id)
-		if aborted {
+		switch {
+		case aborted:
 			sess.removeCall(id)
 			s.broker.endCall(id, string(core.EndCallReasonUserEnded))
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
-		}
-		if gone {
+		case gone:
 			// The call ended meanwhile: release the claim/registry slot.
 			sess.removeCall(id)
 			s.broker.endCall(id, string(core.EndCallReasonUserEnded))
-		} else if accepted {
-			// Another accept won the race; keep its live call.
+		case accepted:
+			// Another accept won the race; keep its live call untouched.
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": id}})
 		return
