@@ -445,6 +445,13 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 	s.broker.broadcastCallList()
 	s.broker.emitIncomingClaimed(sess.id, id, owner)
 	if err := ac.cm.AcceptCall(r.Context(), id); err != nil {
+		// A concurrent accept (double-click / retry by the same owner) may have
+		// won after our CanAcceptID check; that is a no-op, not a reason to
+		// tear down the now-live call.
+		if ac.cm.AlreadyAccepted(id) {
+			writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": id}})
+			return
+		}
 		// AcceptCall only fails before transitioning (build/send/key), so this
 		// is a real failure: stop THIS call and roll back the claim.
 		_ = ac.cm.EndCallForID(r.Context(), id, core.EndCallReasonUserEnded)

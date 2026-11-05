@@ -263,7 +263,9 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 func (m *CallManager) CanAcceptID(callID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.currentCall != nil && m.currentCall.CallID == callID && m.currentCall.CanAccept()
+	c := m.currentCall
+	return c != nil && c.CallID == callID &&
+		c.Direction == core.CallDirectionIncoming && c.CanAccept()
 }
 
 func (m *CallManager) setupIncomingMedia(call *CallInfo, relayData *core.RelayData) {
