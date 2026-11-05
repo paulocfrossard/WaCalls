@@ -454,7 +454,12 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		// Lost the race to another accept: report success, do not teardown.
+		// AbortAccept was a no-op: either another accept is in flight/won, or
+		// the call is already gone. Only clean up the claim in the latter case.
+		if !ac.cm.CanAcceptID(id) && !ac.cm.AlreadyAccepted(id) {
+			sess.removeCall(id)
+			s.broker.endCall(id, string(core.EndCallReasonUserEnded))
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": id}})
 		return
 	}

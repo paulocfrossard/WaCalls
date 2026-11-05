@@ -129,6 +129,7 @@ func (m *CallManager) cleanupMedia() {
 	m.seenRTP = nil
 	m.seenRTPPrune = time.Time{}
 	m.acceptedByJid = ""
+	m.accepting = false
 	m.calleeDevices = nil
 	m.currentCall = nil
 	m.mu.Unlock()

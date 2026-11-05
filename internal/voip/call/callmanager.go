@@ -34,6 +34,7 @@ type CallManager struct {
 	initialTransportSent  bool
 	outgoingPreacceptSent bool
 	acceptedByJid         string
+	accepting             bool
 	calleeDevices         []types.JID
 	debeEnabled           bool
 
@@ -216,6 +217,11 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 		m.mu.Unlock()
 		return &CallError{"call cannot be accepted in state " + string(call.StateData.State)}
 	}
+	if m.accepting {
+		m.mu.Unlock()
+		return &CallError{"accept already in progress"}
+	}
+	m.accepting = true
 	key := call.EncryptionKey
 	peer := wanode.MustJID(call.PeerJid)
 	creator := wanode.MustJID(call.CallCreator)
@@ -223,21 +229,29 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 	relayData := call.RelayData
 	m.mu.Unlock()
 
+	fail := func(err error) error {
+		m.mu.Lock()
+		m.accepting = false
+		m.mu.Unlock()
+		return err
+	}
+
 	// Build and send the accept BEFORE transitioning state. If the stanza
 	// cannot be sent, the call stays ringing so the caller can roll it back
 	// instead of looking like a retried (already-accepted) call.
 	if key == nil {
-		return &CallError{"accept failed: missing call key"}
+		return fail(&CallError{"accept failed: missing call key"})
 	}
 	acceptNode, err := signaling.BuildAcceptStanza(ctx, m.sock, callID, key, peer, creator, isVideo)
 	if err != nil {
-		return &CallError{"build accept failed: " + err.Error()}
+		return fail(&CallError{"build accept failed: " + err.Error()})
 	}
 	if err := m.sock.SendNode(ctx, acceptNode); err != nil {
-		return &CallError{"send accept failed: " + err.Error()}
+		return fail(&CallError{"send accept failed: " + err.Error()})
 	}
 
 	m.mu.Lock()
+	m.accepting = false
 	// Re-check under the lock: the call may have ended/changed during send.
 	if m.currentCall != call || call.IsEnded() || !call.CanAccept() {
 		m.mu.Unlock()
@@ -258,12 +272,13 @@ func (m *CallManager) AcceptCall(ctx context.Context, callID string) error {
 }
 
 // AbortAccept rolls back a failed accept, but only if the call is STILL
-// acceptable (ringing). If another accept already won the race, it is a no-op
-// and reports false so the caller does not tear down the now-live call.
+// acceptable (ringing) and no other accept is in flight. If another accept
+// already won the race, it is a no-op and reports false so the caller does not
+// tear down the now-live call.
 func (m *CallManager) AbortAccept(ctx context.Context, callID string) bool {
 	m.mu.Lock()
 	call := m.currentCall
-	if call == nil || call.CallID != callID || call.IsEnded() || !call.CanAccept() {
+	if m.accepting || call == nil || call.CallID != callID || call.IsEnded() || !call.CanAccept() {
 		m.mu.Unlock()
 		return false
 	}
@@ -288,6 +303,10 @@ func (m *CallManager) AbortAccept(ctx context.Context, callID string) bool {
 	m.cleanupMedia()
 	return true
 }
+
+// AbortAccept rolls back a failed accept, but only if the call is STILL
+// acceptable (ringing). If another accept already won the race, it is a no-op
+// and reports false so the caller does not tear down the now-live call.
 
 // CanAcceptID reports whether callID is an inbound call currently in a state
 // that can be accepted (used to reject stray accepts without tearing down an
