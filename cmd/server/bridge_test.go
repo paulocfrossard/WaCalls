@@ -102,3 +102,78 @@ func TestBridgeDetachDropsCallbacks(t *testing.T) {
 		t.Fatal("Detach must drop OnTerminalICE")
 	}
 }
+
+// TestBridgeDatachannelCloseFiresTerminal: a clean browser teardown (tab
+// close / unload) closes the pcm datachannel; the bridge must fire the
+// terminal callback — the grace-window trigger — without waiting for the
+// ~30s ICE disconnected/failed timeouts.
+func TestBridgeDatachannelCloseFiresTerminal(t *testing.T) {
+	pc, dc, offer := makeBrowserOffer(t)
+	defer pc.Close()
+
+	br, answer, err := NewBridge(offer, slog.Default())
+	if err != nil {
+		t.Fatalf("NewBridge: %v", err)
+	}
+	defer br.Close()
+
+	terminal := make(chan struct{}, 1)
+	br.SetOnTerminalICE(func() { terminal <- struct{}{} })
+
+	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer}); err != nil {
+		t.Fatalf("browser SetRemoteDescription: %v", err)
+	}
+
+	opened := make(chan struct{}, 1)
+	dc.OnOpen(func() { opened <- struct{}{} })
+	select {
+	case <-opened:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for the browser datachannel to open")
+	}
+
+	// Browser side goes away cleanly — same signal a tab close produces.
+	pc.Close()
+
+	select {
+	case <-terminal:
+	case <-time.After(15 * time.Second):
+		t.Fatal("datachannel close must fire the terminal callback")
+	}
+}
+
+// TestBridgeDetachedCloseDoesNotFireTerminal: Detach() runs before any Close
+// on a superseded/removed bridge, so its own teardown must not arm grace.
+func TestBridgeDetachedCloseDoesNotFireTerminal(t *testing.T) {
+	pc, dc, offer := makeBrowserOffer(t)
+	defer pc.Close()
+
+	br, answer, err := NewBridge(offer, slog.Default())
+	if err != nil {
+		t.Fatalf("NewBridge: %v", err)
+	}
+	defer br.Close()
+
+	terminal := make(chan struct{}, 1)
+	br.SetOnTerminalICE(func() { terminal <- struct{}{} })
+
+	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer}); err != nil {
+		t.Fatalf("browser SetRemoteDescription: %v", err)
+	}
+	opened := make(chan struct{}, 1)
+	dc.OnOpen(func() { opened <- struct{}{} })
+	select {
+	case <-opened:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for the browser datachannel to open")
+	}
+
+	br.Detach() // supersede first: clears onTerminalICE
+	pc.Close()
+
+	select {
+	case <-terminal:
+		t.Fatal("a Detached bridge must not fire the terminal callback")
+	case <-time.After(2 * time.Second):
+	}
+}

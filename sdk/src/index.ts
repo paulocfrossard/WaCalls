@@ -147,6 +147,12 @@ export class WaCallsClient {
   #muted = false;
   /** In-flight lock for #openMedia: only one media open at a time (first wins). */
   #mediaOpening = false;
+  /** A server-side call this client owns but has NO browser leg for yet
+   *  (POST /calls or /accept succeeded; #openMedia still running, up to ~4s
+   *  of mic + ICE gathering). Such a call has no grace path server-side
+   *  (grace arms only from a bridge), so pagehide must end it explicitly —
+   *  disconnect() falls back to this when #active is null. */
+  #pending: { sessionId: string; callId: string } | null = null;
   /** Deferred base URL to apply once the active call ends. */
   #pendingBaseUrl: string | null = null;
   /** Generation token: bumped by each #openMedia claim and by disconnect() —
@@ -221,12 +227,17 @@ export class WaCallsClient {
     }
     // Invalidate any in-flight #openMedia: the loser closes its own conn.
     this.#mediaGen += 1;
-    const active = this.#active;
-    if (active) {
-      // Best-effort server-side end (fire-and-forget). Local teardown below
-      // does not wait for it and runs even if the DELETE fails.
-      void this.hangup(active.sessionId, active.callId).catch(() => {});
+    // Best-effort server-side end (fire-and-forget) for the owned call: the
+    // open one (has a browser leg; grace would hold it, but disconnect is
+    // only reached without one) or, failing that, the pending legless one —
+    // a starting/accepting call has no grace path and must not orphan.
+    const target = this.#active ?? this.#pending;
+    if (target) {
+      // Local teardown below does not wait for it and runs even if the
+      // DELETE fails.
+      void this.hangup(target.sessionId, target.callId).catch(() => {});
     }
+    this.#pending = null;
     this.#teardownActive();
     this.#applyPendingBaseUrl();
   }
@@ -351,6 +362,13 @@ export class WaCallsClient {
           ...(endedAt !== undefined ? { endedAt } : {}),
         };
         this.#emitter.emit("call:ended", payload);
+        if (
+          this.#pending &&
+          this.#pending.callId === callId &&
+          this.#pending.sessionId === payload.sessionId
+        ) {
+          this.#pending = null;
+        }
         // Composite identity: two sessions can surface the same call id.
         if (
           this.#active &&
@@ -394,6 +412,7 @@ export class WaCallsClient {
       this.#emitError(msg);
       throw new Error(msg);
     }
+    this.#pending = { sessionId, callId };
     try {
       await this.#openMedia(sessionId, callId);
     } catch (err) {
@@ -415,6 +434,7 @@ export class WaCallsClient {
     // Prefer the server-returned callId (fallback to the argument) when
     // opening media — matches the pre-SDK React client.
     const serverCallId = res?.call?.callId || callId;
+    this.#pending = { sessionId, callId: serverCallId };
     await this.#openMedia(sessionId, serverCallId);
   }
 
@@ -448,6 +468,9 @@ export class WaCallsClient {
       active && active.callId === callId && active.sessionId !== sessionId
         ? active.sessionId
         : sessionId;
+    if (this.#pending && this.#pending.callId === callId) {
+      this.#pending = null;
+    }
     try {
       await this.#request(
         "DELETE",
@@ -470,11 +493,6 @@ export class WaCallsClient {
   }
 
   /** Desired mute state (survives call changes; see toggleMute). */
-  /** The call this client currently holds media for, or null. */
-  get activeCallId(): string | null {
-    return this.#active?.callId ?? null;
-  }
-
   get isMuted(): boolean {
     return this.#muted;
   }
@@ -604,6 +622,9 @@ export class WaCallsClient {
       }
       const audio = this.#renderRemote(conn, this.#cfg.outId ?? null);
       this.#active = { callId, sessionId, conn, audio };
+      // The browser leg exists now: grace can hold this call across a
+      // refresh, so it no longer needs the pending DELETE.
+      this.#pending = null;
     } finally {
       this.#mediaOpening = false;
       if (this.#active === null) this.#applyPendingBaseUrl();

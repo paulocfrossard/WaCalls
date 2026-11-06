@@ -153,3 +153,47 @@ func TestIceGraceRearmAndCancel(t *testing.T) {
 		t.Fatalf("cancel must prevent the ice-grace expiry, fired %d", fired2.Load())
 	}
 }
+
+// TestConfigureRelaysTwoPassReservations drives ConfigureRelays for real
+// (two unreachable relays complete locally with a synthetic answer): both
+// ids must be reserved under one lock before any dial spawns, and every
+// reservation must be released when the dials return.
+func TestConfigureRelaysTwoPassReservations(t *testing.T) {
+	m := NewSctpRelayManager(nil)
+	fired := 0
+	m.SetOnAllLost(func() { fired++ })
+
+	// Token/Key are required: modifySdpForRelay writes them into the
+	// synthetic answer's ice-ufrag/ice-pwd (empty values are rejected).
+	m.ConfigureRelays([]RelayConfig{
+		{IP: "127.0.0.1", Port: 34781, Token: "tok-a", Key: "key-a"},
+		{IP: "127.0.0.1", Port: 34782, Token: "tok-b", Key: "key-b"},
+	})
+
+	m.mu.Lock()
+	pending := m.pendingDials
+	dialing := len(m.dialing)
+	conns := make([]*relayConnection, 0, len(m.connections))
+	for _, c := range m.connections {
+		conns = append(conns, c)
+	}
+	m.mu.Unlock()
+
+	if pending != 0 || dialing != 0 {
+		t.Fatalf("reservations leaked: pendingDials=%d dialing=%d, want 0/0", pending, dialing)
+	}
+	if len(conns) != 2 {
+		t.Fatalf("published connections = %d, want 2", len(conns))
+	}
+	if fired != 0 {
+		t.Fatalf("all-lost fired %d times while connections exist", fired)
+	}
+
+	// Losing both fires exactly once (same cycle semantics as the unit tests).
+	for _, c := range conns {
+		m.failConnection(c)
+	}
+	if fired != 1 {
+		t.Fatalf("all-lost fired %d times after losing both, want 1", fired)
+	}
+}

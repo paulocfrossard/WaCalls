@@ -336,6 +336,10 @@ func (s *Session) setBridge(callID string, b *Bridge) {
 	// that is exactly the page-refresh path.
 	s.grace.cancel(callID)
 	oldB, found := s.reg.setBridge(callID, b)
+	// Cancel AGAIN after the swap: an arm that landed in the cancel→swap gap
+	// (holdCallOnBridgeDetach's recheck still saw the old bridge as current)
+	// would otherwise survive and kill this freshly attached call in 30s.
+	s.grace.cancel(callID)
 	if !found {
 		logbuf.LogEvent("bridge", logbuf.LevelWarn, "setBridge: call not found, new bridge closed", map[string]any{
 			"call_id": callID, "session_id": s.id,
@@ -395,6 +399,13 @@ func (s *Session) terminateCall(callID string, reason core.EndCallReason) {
 // leg during setBridge/removeCall lands here too, but the identity check
 // makes those a no-op.
 func (s *Session) holdCallOnBridgeDetach(callID string, b *Bridge) {
+	// Runs on its own goroutine (spawned by the terminal-ICE/dc-close
+	// callback): a panic here must not kill the process.
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("panic in bridge-detach hold", "call_id", callID, "panic", r)
+		}
+	}()
 	if !s.reg.bridgeIs(callID, b) {
 		return
 	}
