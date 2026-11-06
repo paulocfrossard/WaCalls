@@ -35,3 +35,6 @@ Thumbs.db
 *~
 !native/
 !native/*.dll
+
+# Go build artifact from `go build ./cmd/server/`
+/server
