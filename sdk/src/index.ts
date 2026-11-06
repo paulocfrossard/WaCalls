@@ -470,6 +470,11 @@ export class WaCallsClient {
   }
 
   /** Desired mute state (survives call changes; see toggleMute). */
+  /** The call this client currently holds media for, or null. */
+  get activeCallId(): string | null {
+    return this.#active?.callId ?? null;
+  }
+
   get isMuted(): boolean {
     return this.#muted;
   }

@@ -87,6 +87,22 @@ func NewBridge(offerSDP string, log *slog.Logger) (*Bridge, string, error) {
 			return
 		}
 		br.dc.Store(dc)
+		// A clean browser teardown (tab close / unload) closes the pcm
+		// channel in seconds — noticing here beats waiting for the ICE
+		// disconnected/failed timeouts (~30s) to arm the grace window.
+		// Detach() nils onTerminalICE first, so our own Close is a no-op.
+		dc.OnClose(func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logbuf.LogEvent("bridge", logbuf.LevelError, "panic in dc close callback", map[string]any{
+						"call_id": br.callID, "panic": r,
+					})
+				}
+			}()
+			if cb := br.terminalICE(); cb != nil {
+				cb()
+			}
+		})
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			defer func() {
 				if r := recover(); r != nil {

@@ -187,35 +187,37 @@ func connID(ip string, port int, authTokenID string) string {
 }
 
 func (m *SctpRelayManager) ConfigureRelays(relays []RelayConfig) {
-	var wg sync.WaitGroup
+	// Two passes: reserve EVERY dial id (and the pending counter) under one
+	// lock BEFORE spawning any of them, so a fast-failing first dial can
+	// never observe pendingDials==0 while a sibling is still about to start.
+	var toDial []RelayConfig
+	m.mu.Lock()
+	if m.dialing == nil {
+		m.dialing = map[string]bool{}
+	}
 	for _, r := range relays {
-		port := r.Port
-		if port == 0 {
-			port = core.WARelayPort
+		if r.Port == 0 {
+			r.Port = core.WARelayPort
 		}
-		r.Port = port
-		id := connID(r.IP, port, r.AuthTokenID)
-		m.mu.Lock()
-		if m.dialing == nil {
-			m.dialing = map[string]bool{}
-		}
-		_, exists := m.connections[id]
-		if exists || m.dialing[id] {
-			m.mu.Unlock()
+		id := connID(r.IP, r.Port, r.AuthTokenID)
+		if _, exists := m.connections[id]; exists || m.dialing[id] {
 			continue
 		}
-		// Reserve the id and count the pending dial BEFORE spawning: all-lost
-		// must not fire while a sibling dial has not published yet.
 		m.dialing[id] = true
 		m.pendingDials++
 		m.everDialed = true
-		m.mu.Unlock()
+		toDial = append(toDial, r)
+	}
+	m.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, r := range toDial {
 		wg.Add(1)
 		go func(rc RelayConfig) {
 			defer wg.Done()
 			defer func() {
-				if r := recover(); r != nil {
-					m.log.Error("panic in relay dial", "id", connID(rc.IP, rc.Port, rc.AuthTokenID), "panic", r)
+				if rec := recover(); rec != nil {
+					m.log.Error("panic in relay dial", "id", connID(rc.IP, rc.Port, rc.AuthTokenID), "panic", rec)
 				}
 			}()
 			m.connectToRelay(rc)
@@ -236,6 +238,17 @@ func (m *SctpRelayManager) connectToRelay(info RelayConfig) {
 		info:   info,
 		stopCh: make(chan struct{}),
 	}
+	// Recover where conn is in scope: a panic anywhere below must release a
+	// published conn (failConnection removes it from the map and tears the
+	// pc down) BEFORE dialFinished drops the pending counter, or the entry
+	// would block all-lost and re-dial forever. Registered after
+	// dialFinished so it runs first (LIFO) on unwind.
+	defer func() {
+		if rec := recover(); rec != nil {
+			m.log.Error("panic in relay dial", "id", id, "panic", rec)
+			m.failConnection(conn)
+		}
+	}()
 
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {

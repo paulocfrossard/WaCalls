@@ -34,14 +34,6 @@ export function sdkErrorCode(err: unknown): string | undefined {
   }
 }
 
-// The current document's navigation type ("reload" | "navigate" | "back_forward"),
-// or undefined when the Navigation Timing API is unavailable (treated as a
-// normal navigation — the pre-grace behavior).
-const navigationType = (): string | undefined => {
-  const [nav] = performance.getEntriesByType("navigation");
-  return (nav as PerformanceNavigationTiming | undefined)?.type;
-};
-
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
     if (e.storageArea !== localStorage) return;
@@ -56,11 +48,15 @@ if (typeof window !== "undefined") {
     // Skip bfcache transitions: the page may be restored, and disconnect()
     // permanently stops the client. A real unload has persisted === false.
     if (e.persisted) return;
-    // A RELOAD must NOT end the call: the server holds it for the grace
-    // window (browserGraceWindow) and the refreshed page re-attaches via
-    // resumeCall. Ending it here would delete the call before the new page
-    // ever loads. Only a true tab close / navigation away ends it now.
-    if (navigationType() === "reload") return;
+    // No unload-time API distinguishes a reload from a tab close (the
+    // Navigation Timing entry describes how THIS document was loaded, not
+    // why it is unloading), so the hold-vs-end decision is made from the
+    // local leg instead: a call WITH a browser leg is left to the server's
+    // grace window — the refreshed page re-attaches via resumeCall and a
+    // closed tab simply expires the window. Only legless calls
+    // (starting/ringing races, which have no grace path) are ended here
+    // with the keepalive DELETE so they cannot orphan.
+    if (sdkClient.activeCallId !== null) return;
     sdkClient.disconnect();
   });
   window.addEventListener("pageshow", (e) => {

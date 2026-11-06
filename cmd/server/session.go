@@ -403,6 +403,13 @@ func (s *Session) holdCallOnBridgeDetach(callID string, b *Bridge) {
 	}
 	s.log.Info("browser leg detached; holding the call for the grace window", "call_id", callID)
 	s.grace.arm(callID)
+	// TOCTOU: a re-attach can swap the bridge between the identity check
+	// above and the arm (setBridge cancels BEFORE its swap, so an arm that
+	// lands after a completed re-attach would never be cancelled). Re-check
+	// and cancel if the bridge we armed for is no longer the current one.
+	if !s.reg.bridgeIs(callID, b) {
+		s.grace.cancel(callID)
+	}
 }
 
 func (s *Session) teardownAllCalls() []*call.CallManager {
