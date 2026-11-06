@@ -412,7 +412,7 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 		ac.cm.FeedCapturedPCM(pcm)
 	})
 	bridge.SetOnTerminalICE(func() {
-		go sess.terminateCallIfBridge(callID, bridge)
+		go sess.holdCallOnBridgeDetach(callID, bridge)
 	})
 	sess.setBridge(callID, bridge)
 	writeJSON(w, http.StatusOK, map[string]string{"sdp_answer": answer})

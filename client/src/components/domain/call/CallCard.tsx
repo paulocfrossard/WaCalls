@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Headphones, Mic, PhoneOff } from "lucide-react";
+import { Headphones, Mic, PhoneOff, RefreshCw } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,8 @@ import { sdkClient } from "@/lib/sdk-client";
 import { useSdkCallFor } from "@/hooks/useSdkCall";
 import { useDevices } from "@/stores/devices";
 import { useEndCall } from "@/hooks/useEndCall";
+import { useResumeCall } from "@/hooks/useResumeCall";
+import { needsAudioResume } from "@/lib/resume";
 import { formatCallDuration } from "@/utils/format";
 import type { CallStatus, CallSummary } from "@/types/call";
 
@@ -243,6 +245,11 @@ export const CallCard = ({ call }: { call: CallSummary }) => {
   const conn = useSdkCallFor(call.callId);
   const outDeviceId = useDevices((s) => s.outId);
   const endCall = useEndCall();
+  const resume = useResumeCall();
+  // A connected call with no local leg here is one a page refresh dropped:
+  // the server holds it open for the grace window and this card re-attaches.
+  const detached = needsAudioResume(call.status, !!conn);
+  const autoResumed = useRef(false);
   const [, force] = useState(0);
   const [muted, setMuted] = useState(false);
   const [monitorWanted, setMonitorWanted] = useState(false);
@@ -254,6 +261,17 @@ export const CallCard = ({ call }: { call: CallSummary }) => {
 
   // Live view: another call card (or a failed start) may have stopped it.
   const monitorOn = monitorWanted && isDownlinkMonitorActive(call.callId);
+
+  // Auto-resume the audio once when the call comes back detached (e.g. after
+  // a refresh). A single attempt avoids re-prompting for the mic in a loop; a
+  // failure surfaces the manual "Reconnect" button below.
+  useEffect(() => {
+    if (detached && !autoResumed.current && !resume.isPending) {
+      autoResumed.current = true;
+      resume.mutate({ sid: call.sessionId, callId: call.callId });
+    }
+    if (!detached) autoResumed.current = false;
+  }, [detached, resume, call.sessionId, call.callId]);
 
   // Duration badge ticker (not the meters — they run on rAF below).
   useEffect(() => {
@@ -489,6 +507,22 @@ export const CallCard = ({ call }: { call: CallSummary }) => {
             </Badge>
           </div>
           <div className="flex items-center gap-2">
+            {detached && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={() => resume.mutate({ sid: call.sessionId, callId: call.callId })}
+                    disabled={resume.isPending}
+                    aria-label="Reconnect call"
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Reconectar chamada</TooltipContent>
+              </Tooltip>
+            )}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button

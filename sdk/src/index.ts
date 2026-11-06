@@ -418,6 +418,16 @@ export class WaCallsClient {
     await this.#openMedia(sessionId, serverCallId);
   }
 
+  /**
+   * Re-opens media for a call that is already live and owned by this client
+   * (page refresh dropped the WebRTC bridge; the server holds the call for a
+   * grace window). No accept call, and NO hangup compensation on failure — the
+   * server call keeps running so the operator can retry.
+   */
+  async resumeCall(sessionId: string, callId: string): Promise<void> {
+    await this.#openMedia(sessionId, callId);
+  }
+
   /** POST .../reject — no media involved. */
   async rejectCall(sessionId: string, callId: string): Promise<void> {
     await this.#request("POST", `/api/sessions/${encodeURIComponent(sessionId)}/calls/${encodeURIComponent(callId)}/reject`, {});

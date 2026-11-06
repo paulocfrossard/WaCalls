@@ -44,6 +44,10 @@ type Session struct {
 	// replayWindow overrides offlineReplayMaxWindow when non-zero; test-only knob.
 	replayWindow time.Duration
 
+	// grace holds calls whose browser leg dropped (page refresh) for
+	// browserGraceWindow before ending them, so the page can re-attach.
+	grace *graceKeeper
+
 	mu   sync.Mutex
 	auth AuthSnapshot
 }
@@ -58,6 +62,10 @@ func newSession(mgr *SessionManager, id, name string, client *whatsmeow.Client) 
 		auth:   AuthSnapshot{State: "connecting"},
 		reg:    newCallRegistry(),
 	}
+	s.grace = newGraceKeeper(browserGraceWindow, func(callID string) {
+		s.log.Warn("call ended: browser did not return within the grace window", "call_id", callID)
+		s.terminateCall(callID, core.EndCallReasonUserEnded)
+	})
 	s.newCallManager = s.newCall
 	client.AddEventHandler(s.handleEvent)
 	return s
@@ -343,6 +351,9 @@ func (s *Session) setBridge(callID string, b *Bridge) {
 		oldB.Close()
 		return
 	}
+	// A fresh browser leg re-attached: cancel any pending grace countdown so
+	// the call is no longer waiting for the old (refreshed-away) leg.
+	s.grace.cancel(callID)
 	peer := "unknown"
 	if rec, ok := s.mgr.broker.getCall(s.id, callID); ok {
 		peer = maskPeer(rec.Peer)
@@ -353,6 +364,7 @@ func (s *Session) setBridge(callID string, b *Bridge) {
 }
 
 func (s *Session) removeCall(callID string) {
+	s.grace.cancel(callID)
 	ac, ok := s.reg.remove(callID)
 	if !ok {
 		return
@@ -374,20 +386,25 @@ func (s *Session) terminateCall(callID string, reason core.EndCallReason) {
 	_ = ac.cm.EndCall(context.Background(), reason)
 }
 
-// terminateCallIfBridge ends callID only when b still owns it, so an in-flight
-// ICE callback from a replaced/closed bridge cannot kill the live call.
-func (s *Session) terminateCallIfBridge(callID string, b *Bridge) {
+// holdCallOnBridgeDetach runs when a browser leg's peer connection fails or
+// closes. If it is still the current leg (not superseded by a re-attach and
+// not already removed), it starts the grace countdown instead of ending the
+// call immediately, so a page refresh can re-attach. Closing the superseded
+// leg during setBridge/removeCall lands here too, but the identity check
+// makes those a no-op.
+func (s *Session) holdCallOnBridgeDetach(callID string, b *Bridge) {
 	if !s.reg.bridgeIs(callID, b) {
 		return
 	}
-	ac, ok := s.reg.get(callID)
-	if !ok {
+	if _, ok := s.reg.get(callID); !ok {
 		return
 	}
-	_ = ac.cm.EndCall(context.Background(), core.EndCallReasonUserEnded)
+	s.log.Info("browser leg detached; holding the call for the grace window", "call_id", callID)
+	s.grace.arm(callID)
 }
 
 func (s *Session) teardownAllCalls() []*call.CallManager {
+	s.grace.stopAll()
 	cms := make([]*call.CallManager, 0)
 	for _, ac := range s.reg.drain() {
 		_ = ac.cm.EndCall(context.Background(), core.EndCallReasonUserEnded)
