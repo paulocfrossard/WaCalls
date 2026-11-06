@@ -39,8 +39,12 @@ mic
 WhatsApp relay
  └► SRTP Unprotect — HMAC tag verified by default (-srtp-auth=true);
      invalid tag ⇒ packet dropped (RFC 3711 behavior, see implementacao.md §1)
-     └► RTP depacketize → MLow decode (960-sample / 60 ms frames, float [-1,1])
-         └► bridge → Int16 LE PCM over datachannel "pcm"
+     └► RTP depacketize → jitter buffer (release in sequence order so the
+         stateful codec decodes in production order; a frame still missing
+         after 3 newer packets is concealed with a fade-out of the last
+         frame — `internal/voip/call/jitterbuffer.go`)
+         └► MLow decode (960-sample / 60 ms frames, float [-1,1])
+             └► bridge → Int16 LE PCM over datachannel "pcm"
              └► AudioWorklet playback processor → speaker
 ```
 

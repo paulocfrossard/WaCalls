@@ -61,6 +61,15 @@ Call controls are **session- and owner-scoped**: `accept`/`reject`/`end` first r
 the call through the URL's session registry, so a `callId` from another session can
 never be controlled here.
 
+**Page refresh / browser leg loss:** when the WebRTC bridge dies while the call is
+still live (terminal ICE), the server **holds the call for 30 s**
+(`browserGraceWindow`, `cmd/server/grace.go`) instead of ending it. The refreshed
+page re-attaches by calling `POST .../webrtc` again with the same owner
+(`X-Client-Id` persists in `localStorage`); a re-attach cancels the countdown.
+If no leg returns within the window, the call is ended with a
+`call:ended` event. `reject`/`end`, a call ending by any other path, and session
+teardown clear the countdown immediately.
+
 ## History
 
 | Method | Path | Success | Notes |
