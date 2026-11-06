@@ -100,7 +100,9 @@ export const openCall = async (opts: OpenCallOptions): Promise<OpenCall> => {
     ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
     await addWorkletModule(ctx, CAPTURE_PROCESSOR_SRC);
     await addWorkletModule(ctx, PLAYBACK_PROCESSOR_SRC);
-    await ctx.resume();
+    // NOTE: ctx.resume() is deliberately NOT awaited here — see the end of
+    // this try block (M2 rationale): the autoplay gate must never block the
+    // POST /webrtc signaling round-trip that cancels the server grace.
 
     const micSource = ctx.createMediaStreamSource(micStream);
     const captureNode = new AudioWorkletNode(ctx, CAPTURE_PROCESSOR_NAME);
@@ -152,6 +154,17 @@ export const openCall = async (opts: OpenCallOptions): Promise<OpenCall> => {
 
     const sdpAnswer = await signaling.sendOffer(sessionId, callId, pc.localDescription!.sdp);
     await pc.setRemoteDescription({ type: "answer", sdp: sdpAnswer });
+    // M2: resume only AFTER the signaling round-trip succeeded. Resuming
+    // earlier made the whole openCall wait on the browser autoplay gate,
+    // which could block POST /webrtc long enough to lose the grace cancel.
+    // The call and signaling are already established at this point, so a
+    // rejection here must NOT fail openCall: swallow it and let audio start
+    // on the next user gesture (the worklet nodes are already wired above).
+    try {
+      await ctx.resume();
+    } catch {
+      // ignored — audio starts on the next user gesture; call stays up.
+    }
   } catch (err) {
     cleanup();
     throw err;

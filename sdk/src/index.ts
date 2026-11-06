@@ -135,6 +135,23 @@ const asString = (v: unknown): string => (typeof v === "string" ? v : "");
 const asNumber = (v: unknown): number | undefined =>
   typeof v === "number" && Number.isFinite(v) ? v : undefined;
 
+/** Per-tab leg claim key prefix (M1): marks that THIS tab holds the WebRTC
+ *  leg for a call, so a second tab of the same profile cannot steal it via
+ *  resume and the client can tell "my leg" from "another tab's call". */
+const LEG_CLAIM_PREFIX = "wacalls.leg.";
+
+/** Write the per-tab leg claim. No-op outside the browser (SSR/tests). */
+const setLegClaim = (callId: string): void => {
+  if (typeof sessionStorage === "undefined") return;
+  sessionStorage.setItem(LEG_CLAIM_PREFIX + callId, "1");
+};
+
+/** Drop the per-tab leg claim. No-op outside the browser (SSR/tests). */
+const clearLegClaim = (callId: string): void => {
+  if (typeof sessionStorage === "undefined") return;
+  sessionStorage.removeItem(LEG_CLAIM_PREFIX + callId);
+};
+
 export class WaCallsClient {
   readonly #cfg: Required<Pick<WaCallsConfig, "baseUrl" | "clientId">> & WaCallsConfig;
   readonly #emitter = new Emitter<WaCallsClientEvents>();
@@ -362,6 +379,19 @@ export class WaCallsClient {
           ...(endedAt !== undefined ? { endedAt } : {}),
         };
         this.#emitter.emit("call:ended", payload);
+        // M1: per-tab leg claim — drop it when the ended frame matches this
+        // tab's call by composite identity (sessionId+callId, same match as
+        // the #pending/#active drops below; two sessions can share a call id).
+        if (
+          (this.#pending &&
+            this.#pending.callId === callId &&
+            this.#pending.sessionId === payload.sessionId) ||
+          (this.#active &&
+            this.#active.callId === callId &&
+            this.#active.sessionId === payload.sessionId)
+        ) {
+          clearLegClaim(callId);
+        }
         if (
           this.#pending &&
           this.#pending.callId === callId &&
@@ -622,6 +652,9 @@ export class WaCallsClient {
       }
       const audio = this.#renderRemote(conn, this.#cfg.outId ?? null);
       this.#active = { callId, sessionId, conn, audio };
+      // M1: per-tab leg claim — this tab now holds the WebRTC leg; a second
+      // tab of the same profile sees no claim and must not steal it via resume.
+      setLegClaim(callId);
       // The browser leg exists now: grace can hold this call across a
       // refresh, so it no longer needs the pending DELETE.
       this.#pending = null;
@@ -656,6 +689,9 @@ export class WaCallsClient {
   #teardownActive(applyBase = true): void {
     const active = this.#active;
     if (!active) return;
+    // M1: per-tab leg claim — this tab no longer holds the leg; drop the
+    // claim BEFORE nulling #active so the claim always tracks the live leg.
+    clearLegClaim(active.callId);
     this.#active = null;
     try {
       active.conn.close(); // stops mic tracks + closes AudioContext + pc

@@ -16,7 +16,7 @@ import { useSdkCallFor } from "@/hooks/useSdkCall";
 import { useDevices } from "@/stores/devices";
 import { useEndCall } from "@/hooks/useEndCall";
 import { useResumeCall } from "@/hooks/useResumeCall";
-import { needsAudioResume } from "@/lib/resume";
+import { hasLegClaim, needsAudioResume } from "@/lib/resume";
 import { formatCallDuration } from "@/utils/format";
 import type { CallStatus, CallSummary } from "@/types/call";
 
@@ -246,9 +246,11 @@ export const CallCard = ({ call }: { call: CallSummary }) => {
   const outDeviceId = useDevices((s) => s.outId);
   const endCall = useEndCall();
   const resume = useResumeCall();
-  // A connected call with no local leg here is one a page refresh dropped:
-  // the server holds it open for the grace window and this card re-attaches.
-  const detached = needsAudioResume(call.status, !!conn);
+  // A call this tab held the leg for (per-tab claim) but has no local audio
+  // here is one a page refresh dropped: the server holds it open for the
+  // grace window and this card re-attaches. Without the claim another tab's
+  // call (or a call this tab never owned) must never be stolen (M1).
+  const detached = needsAudioResume(call.status, !!conn, hasLegClaim(call.callId));
   const autoResumed = useRef(false);
   const [, force] = useState(0);
   const [muted, setMuted] = useState(false);
@@ -265,8 +267,14 @@ export const CallCard = ({ call }: { call: CallSummary }) => {
   // Auto-resume the audio once when the call comes back detached (e.g. after
   // a refresh). A single attempt avoids re-prompting for the mic in a loop; a
   // failure surfaces the manual "Reconnect" button below.
+  // M2: only fire while the browser reports an active user activation —
+  // without one the mic/autoplay gate would stall the attempt and stick
+  // `isPending`, disabling the Reconnect button. When activation is missing we
+  // SKIP without marking autoResumed, so a later effect pass (after a real
+  // activation) or the manual Reconnect click can still run it.
   useEffect(() => {
     if (detached && !autoResumed.current && !resume.isPending) {
+      if (navigator.userActivation?.isActive !== true) return;
       autoResumed.current = true;
       resume.mutate({ sid: call.sessionId, callId: call.callId });
     }
