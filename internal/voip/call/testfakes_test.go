@@ -172,6 +172,7 @@ type fakeRelayTransport struct {
 	broadcasts  [][]byte
 	cleaned     bool
 	resendCount int
+	allLostFn   func()
 }
 
 func newFakeRelay() *fakeRelayTransport { return &fakeRelayTransport{} }
@@ -195,6 +196,22 @@ func (f *fakeRelayTransport) SetOnReceive(fn func([]byte)) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.receiveFn = fn
+}
+
+func (f *fakeRelayTransport) SetOnAllLost(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.allLostFn = fn
+}
+
+// LoseAll simulates every relay connection dropping.
+func (f *fakeRelayTransport) LoseAll() {
+	f.mu.Lock()
+	fn := f.allLostFn
+	f.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
 }
 func (f *fakeRelayTransport) ResendSubscriptions() {
 	f.mu.Lock()

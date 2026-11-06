@@ -65,6 +65,12 @@ type SctpRelayManager struct {
 	onConnected func(ip string, port int)
 
 	onReceive func(data []byte)
+
+	// onAllLost fires (at most once per dial cycle) when every dialed relay
+	// connection is gone, so the call owner can end a media-less zombie call
+	// instead of leaving it ACTIVE forever.
+	onAllLost  func()
+	everDialed bool
 }
 
 func NewSctpRelayManager(log *slog.Logger) *SctpRelayManager {
@@ -84,6 +90,23 @@ func (m *SctpRelayManager) SetSubscriptionSsrc(ssrc uint32) { m.subscriptionSsrc
 func (m *SctpRelayManager) SetOnConnected(fn func(ip string, port int)) { m.onConnected = fn }
 
 func (m *SctpRelayManager) SetOnReceive(fn func(data []byte)) { m.onReceive = fn }
+
+func (m *SctpRelayManager) SetOnAllLost(fn func()) { m.onAllLost = fn }
+
+// noteConnectionLost reports whether the last dialed connection just went
+// away, firing onAllLost exactly once for that dial cycle.
+func (m *SctpRelayManager) noteConnectionLost() {
+	m.mu.Lock()
+	fire := len(m.connections) == 0 && m.everDialed && m.onAllLost != nil
+	fn := m.onAllLost
+	if fire {
+		m.everDialed = false // re-arm for the next dial cycle
+	}
+	m.mu.Unlock()
+	if fire {
+		fn()
+	}
+}
 
 func (m *SctpRelayManager) ResendSubscriptions() {
 	m.mu.Lock()
@@ -142,6 +165,7 @@ func (m *SctpRelayManager) connectToRelay(info RelayConfig) {
 	}
 	m.mu.Lock()
 	m.connections[id] = conn
+	m.everDialed = true
 	m.mu.Unlock()
 
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
@@ -420,6 +444,7 @@ func (m *SctpRelayManager) failConnection(conn *relayConnection) {
 	conn.setState(relayStateFailed)
 	delete(m.connections, conn.id)
 	m.mu.Unlock()
+	m.noteConnectionLost()
 	m.teardown(conn)
 }
 
@@ -433,6 +458,7 @@ func (m *SctpRelayManager) closeConnection(id string) {
 	conn.setState(relayStateClosed)
 	delete(m.connections, id)
 	m.mu.Unlock()
+	m.noteConnectionLost()
 	m.teardown(conn)
 }
 

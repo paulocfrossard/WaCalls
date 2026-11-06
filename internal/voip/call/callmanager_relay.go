@@ -11,6 +11,7 @@ type RelayTransport interface {
 	SetSubscriptionSsrc(ssrc uint32)
 	SetOnConnected(fn func(ip string, port int))
 	SetOnReceive(fn func(data []byte))
+	SetOnAllLost(fn func())
 	ResendSubscriptions()
 	ConfigureRelays(relays []transport.RelayConfig)
 	Broadcast(data []byte)

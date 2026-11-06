@@ -81,6 +81,7 @@ func NewCallManager(sock core.VoipSocket, log *slog.Logger) *CallManager {
 	relay := transport.NewSctpRelayManager(log)
 	relay.SetOnConnected(func(ip string, port int) { m.onRelayConnected() })
 	relay.SetOnReceive(func(data []byte) { m.onRelayData(data) })
+	relay.SetOnAllLost(func() { m.onRelayAllLost() })
 	m.relay = relay
 	return m
 }
@@ -113,10 +114,12 @@ func NewCallManagerWithDeps(d Deps) *CallManager {
 		m.relay = d.Relay
 		d.Relay.SetOnConnected(func(ip string, port int) { m.onRelayConnected() })
 		d.Relay.SetOnReceive(func(data []byte) { m.onRelayData(data) })
+		d.Relay.SetOnAllLost(func() { m.onRelayAllLost() })
 	} else {
 		relay := transport.NewSctpRelayManager(log)
 		relay.SetOnConnected(func(ip string, port int) { m.onRelayConnected() })
 		relay.SetOnReceive(func(data []byte) { m.onRelayData(data) })
+		relay.SetOnAllLost(func() { m.onRelayAllLost() })
 		m.relay = relay
 	}
 	if d.Codec != nil {
@@ -480,6 +483,25 @@ func (m *CallManager) endCall(ctx context.Context, expectID string, reason core.
 	}
 	m.cleanupMedia()
 	return nil
+}
+
+// onRelayAllLost ends a live call whose relay transport lost every connection.
+// Without this the call stays ACTIVE with no media (zombie) until the peer or
+// user gives up.
+func (m *CallManager) onRelayAllLost() {
+	m.mu.Lock()
+	call := m.currentCall
+	live := call != nil && !call.IsEnded()
+	cid := ""
+	if call != nil {
+		cid = call.CallID
+	}
+	m.mu.Unlock()
+	if !live {
+		return
+	}
+	m.log.Warn("all relay connections lost; ending call (no media path)", "call_id", cid)
+	_ = m.EndCall(context.Background(), core.EndCallReasonFailed)
 }
 
 // WaitPendingSends blocks until every detached terminate/reject send has
