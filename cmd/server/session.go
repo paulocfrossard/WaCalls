@@ -329,7 +329,11 @@ func (s *Session) info() SessionInfo {
 	return SessionInfo{ID: s.id, Name: s.name, JID: jid, State: a.State, Paired: a.Paired || jid != ""}
 }
 
-func (s *Session) setBridge(callID string, b *Bridge) {
+// setBridge attaches b as the browser leg of callID. It reports whether the
+// call was found in the registry: false means the call vanished (ended/rejected)
+// before the swap, b has been closed, and the caller must not treat this as a
+// successful attach (the WebRTC endpoint answers 404 instead of an SDP answer).
+func (s *Session) setBridge(callID string, b *Bridge) bool {
 	// A fresh browser leg re-attached: cancel any pending grace countdown so
 	// the call is no longer waiting for the old (refreshed-away) leg. This
 	// must happen even when a previous (dead) bridge is still registered —
@@ -345,7 +349,7 @@ func (s *Session) setBridge(callID string, b *Bridge) {
 			"call_id": callID, "session_id": s.id,
 		})
 		b.Close()
-		return
+		return false
 	}
 	if oldB != nil {
 		// A replaced bridge with an active WebRTC peer is a duplication
@@ -358,7 +362,7 @@ func (s *Session) setBridge(callID string, b *Bridge) {
 		// while OnBrowserPCM would keep feeding the live CallManager.
 		oldB.Detach()
 		oldB.Close()
-		return
+		return true
 	}
 	peer := "unknown"
 	if rec, ok := s.mgr.broker.getCall(s.id, callID); ok {
@@ -367,6 +371,7 @@ func (s *Session) setBridge(callID string, b *Bridge) {
 	logbuf.LogEvent("bridge", logbuf.LevelInfo, "setBridge: bridge attached", map[string]any{
 		"call_id": callID, "session_id": s.id, "peer": peer,
 	})
+	return true
 }
 
 func (s *Session) removeCall(callID string) {

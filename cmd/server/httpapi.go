@@ -414,7 +414,14 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 	bridge.SetOnTerminalICE(func() {
 		go sess.holdCallOnBridgeDetach(callID, bridge)
 	})
-	sess.setBridge(callID, bridge)
+	// The call can vanish (end/reject/teardown) between the registry check
+	// above and this swap: setBridge reports it, and we answer 404 rather
+	// than 200 with an SDP answer for a call that no longer exists (the
+	// bridge it just built is closed by setBridge itself).
+	if !sess.setBridge(callID, bridge) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"sdp_answer": answer})
 }
 
