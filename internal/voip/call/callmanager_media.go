@@ -233,32 +233,74 @@ func (m *CallManager) onRelayData(data []byte) {
 			go m.relay.ResendSubscriptions()
 		}
 	}
-	m.mu.Unlock()
-	pcm, err := codec.Decode(pkt.Payload)
-	if err != nil {
-		if logbuf.Enabled() && logbuf.Allow("decoder:"+callID, 5) {
-			logbuf.LogEvent("decoder", logbuf.LevelError, "opus decode failed (frame dropped)", map[string]any{
-				"call_id":     callID,
-				"err":         err.Error(),
-				"payload_len": len(pkt.Payload),
+	// Reorder by RTP sequence so the stateful codec decodes frames in
+	// production order; frames missing for jitterDepth newer packets are
+	// concealed instead of leaving a hole in the playout.
+	if m.jitter == nil {
+		m.jitter = newJitterBuffer(jitterDepth)
+	}
+	var out [][]float32
+	for _, fr := range m.jitter.push(seq, pkt.Payload) {
+		if !fr.present {
+			if c := m.concealLocked(); c != nil {
+				out = append(out, c)
+			}
+			continue
+		}
+		pcm, err := codec.Decode(fr.payload)
+		if err != nil || len(pcm) == 0 {
+			if err != nil && logbuf.Enabled() && logbuf.Allow("decoder:"+callID, 5) {
+				logbuf.LogEvent("decoder", logbuf.LevelError, "opus decode failed (frame dropped)", map[string]any{
+					"call_id":     callID,
+					"err":         err.Error(),
+					"payload_len": len(fr.payload),
+				})
+			}
+			continue
+		}
+		pcm = media.NormalizeFrame(pcm, codec.FrameSize())
+		m.lastFrame = pcm
+		m.concealed = 0
+		m.framesDecoded.Add(1)
+		m.lastDownlink.Store(time.Now().UnixMilli())
+		// Rate-limited 5/s: len/peak show whether dead air or hot audio follows.
+		if logbuf.Enabled() && logbuf.Allow("downlink-decode:"+callID, 5) {
+			rms, peak := logbuf.PCMStats(pcm)
+			logbuf.LogEvent("downlink-decode", logbuf.LevelDebug, "peer frame decoded", map[string]any{
+				"call_id": callID,
+				"samples": len(pcm),
+				"rms":     logbuf.Round4(rms),
+				"peak":    logbuf.Round4(peak),
 			})
 		}
-		return
+		out = append(out, pcm)
 	}
-	pcm = media.NormalizeFrame(pcm, codec.FrameSize())
-	m.framesDecoded.Add(1)
-	m.lastDownlink.Store(time.Now().UnixMilli())
-	// Rate-limited 5/s: len/peak show whether dead air or hot audio follows.
-	if logbuf.Enabled() && logbuf.Allow("downlink-decode:"+callID, 5) {
-		rms, peak := logbuf.PCMStats(pcm)
-		logbuf.LogEvent("downlink-decode", logbuf.LevelDebug, "peer frame decoded", map[string]any{
-			"call_id": callID,
-			"samples": len(pcm),
-			"rms":     logbuf.Round4(rms),
-			"peak":    logbuf.Round4(peak),
-		})
+	m.mu.Unlock()
+	for _, pcm := range out {
+		if m.OnPeerAudio != nil {
+			m.OnPeerAudio(pcm)
+		}
 	}
-	if m.OnPeerAudio != nil {
-		m.OnPeerAudio(pcm)
+}
+
+// concealLocked produces a frame to cover a lost packet: the last decoded
+// frame faded out once, then silence for any consecutive losses.
+// Caller holds m.mu.
+func (m *CallManager) concealLocked() []float32 {
+	n := 960 // default 16 kHz frame
+	if m.codec != nil {
+		n = m.codec.FrameSize()
 	}
+	if len(m.lastFrame) > 0 {
+		n = len(m.lastFrame)
+	}
+	pcm := make([]float32, n)
+	if m.concealed == 0 && len(m.lastFrame) > 1 {
+		last := len(pcm) - 1
+		for i := range pcm {
+			pcm[i] = m.lastFrame[i] * (1 - float32(i)/float32(last))
+		}
+	}
+	m.concealed++
+	return pcm
 }

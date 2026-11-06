@@ -129,6 +129,9 @@ func (m *CallManager) cleanupMedia() {
 	m.encodeBufPos = 0
 	m.seenRTP = nil
 	m.seenRTPPrune = time.Time{}
+	m.jitter = nil
+	m.lastFrame = nil
+	m.concealed = 0
 	m.acceptedByJid = ""
 	m.acceptingCallID = ""
 	m.calleeDevices = nil

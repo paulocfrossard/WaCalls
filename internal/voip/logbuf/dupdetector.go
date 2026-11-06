@@ -2,6 +2,7 @@ package logbuf
 
 import (
 	"context"
+	"math"
 	"sync"
 	"time"
 )
@@ -14,8 +15,8 @@ import (
 // symptom.
 type DupDetector struct {
 	mu       sync.Mutex
-	writes   map[string][]time.Time // callID → recent WritePCM timestamps
-	lastEmit map[string]time.Time   // callID → when we last warned (cooldown)
+	writes   map[string][]writeSample // callID → recent WritePCM samples
+	lastEmit map[string]time.Time     // callID → when we last warned (cooldown)
 	now      func() time.Time
 
 	window   time.Duration // lookback for candidate pairs (2s)
@@ -26,7 +27,7 @@ type DupDetector struct {
 // NewDupDetector returns a detector with the default windows.
 func NewDupDetector() *DupDetector {
 	return &DupDetector{
-		writes:   map[string][]time.Time{},
+		writes:   map[string][]writeSample{},
 		lastEmit: map[string]time.Time{},
 		now:      time.Now,
 		window:   2 * time.Second,
@@ -37,28 +38,53 @@ func NewDupDetector() *DupDetector {
 
 var defaultDup = NewDupDetector()
 
-// RecordWritePCM feeds one WritePCM timestamp for callID into the
-// process-wide detector. No-op when the debug log is disabled.
-func RecordWritePCM(callID string) {
+// writeSample is one WritePCM call: when the PCM payload is known it is
+// fingerprinted so a legitimate jitter-buffer catch-up burst (different frames
+// released back-to-back) is not mistaken for a duplicated audio path (same
+// frame written twice).
+type writeSample struct {
+	at   time.Time
+	hash uint32
+}
+
+// hashPCM is a cheap FNV-1a over the float32 bit patterns.
+func hashPCM(pcm []float32) uint32 {
+	h := uint32(2166136261)
+	for _, v := range pcm {
+		h ^= math.Float32bits(v)
+		h *= 16777619
+	}
+	return h
+}
+
+// RecordWritePCM feeds one WritePCM timestamp (and its PCM fingerprint, when
+// available) for callID into the process-wide detector. No-op when the debug
+// log is disabled.
+func RecordWritePCM(callID string, pcm []float32) {
 	if !Enabled() || callID == "" {
 		return
 	}
-	defaultDup.Record(callID)
+	defaultDup.Record(callID, pcm)
 }
 
 // StartDupDetector runs the process-wide detector until ctx is cancelled.
 // Safe to run while logging is disabled (it just idles).
 func StartDupDetector(ctx context.Context) { defaultDup.Run(ctx) }
 
-// Record stores a WritePCM timestamp for callID.
-func (d *DupDetector) Record(callID string) {
+// Record stores a WritePCM timestamp (and optional PCM fingerprint) for callID.
+// pcm may be omitted by legacy callers; a zero hash means "unknown content"
+// and falls back to the timing-only rule.
+func (d *DupDetector) Record(callID string, pcm ...[]float32) {
 	if callID == "" {
 		return
 	}
-	now := d.now()
+	sample := writeSample{at: d.now()}
+	if len(pcm) > 0 && len(pcm[0]) > 0 {
+		sample.hash = hashPCM(pcm[0])
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.writes[callID] = append(d.writes[callID], now)
+	d.writes[callID] = append(d.writes[callID], sample)
 }
 
 // Run ticks every interval and checks the recorded timestamps until ctx ends.
@@ -87,9 +113,9 @@ func (d *DupDetector) Check() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for callID, ts := range d.writes {
-		kept := make([]time.Time, 0, len(ts))
+		kept := make([]writeSample, 0, len(ts))
 		for _, t := range ts {
-			if !t.Before(cut) {
+			if !t.at.Before(cut) {
 				kept = append(kept, t)
 			}
 		}
@@ -100,14 +126,22 @@ func (d *DupDetector) Check() {
 		}
 		d.writes[callID] = kept
 
-		var a, b time.Time
+		var a, b writeSample
 		found := false
 		for i := 1; i < len(kept); i++ {
-			if kept[i].Sub(kept[i-1]) < d.closeGap {
-				a, b = kept[i-1], kept[i]
-				found = true
-				break
+			if kept[i].at.Sub(kept[i-1].at) >= d.closeGap {
+				continue
 			}
+			// Two writes this close are only suspicious when they carry the
+			// SAME PCM (a duplicated audio path). Different content within the
+			// gap is a jitter-buffer catch-up releasing reordered frames.
+			prev, cur := kept[i-1], kept[i]
+			if prev.hash != 0 && cur.hash != 0 && prev.hash != cur.hash {
+				continue
+			}
+			a, b = prev, cur
+			found = true
+			break
 		}
 		if !found {
 			continue
@@ -120,9 +154,9 @@ func (d *DupDetector) Check() {
 			"two WritePCM calls closer than 50ms for the same call (duplicated audio path?)",
 			map[string]any{
 				"call_id":   callID,
-				"ts_first":  a.UTC().Format(time.RFC3339Nano),
-				"ts_second": b.UTC().Format(time.RFC3339Nano),
-				"gap_ms":    Round4(float64(b.Sub(a).Microseconds()) / 1000.0),
+				"ts_first":  a.at.UTC().Format(time.RFC3339Nano),
+				"ts_second": b.at.UTC().Format(time.RFC3339Nano),
+				"gap_ms":    Round4(float64(b.at.Sub(a.at).Microseconds()) / 1000.0),
 			})
 	}
 }

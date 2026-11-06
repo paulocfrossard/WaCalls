@@ -154,7 +154,7 @@ func (b *Bridge) WritePCM(pcm []float32) error {
 	if logbuf.Enabled() {
 		// Feeds the 1s dup-detector: two WritePCM <50ms apart for the same
 		// callID (healthy cadence is ~60ms) = duplicated audio path.
-		logbuf.RecordWritePCM(b.callID)
+		logbuf.RecordWritePCM(b.callID, pcm)
 		// Rate-limited 5/s with samples + peak for correlation.
 		if logbuf.Allow("bridge-downlink:"+b.callID, 5) {
 			_, peak := logbuf.PCMStats(pcm)

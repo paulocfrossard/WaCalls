@@ -57,6 +57,11 @@ type CallManager struct {
 	// graceful drain can wait (bounded) for them before exit.
 	pendingSends atomic.Int64
 
+	// Inbound reorder/concealment (see jitterbuffer.go). Guarded by m.mu.
+	jitter    *jitterBuffer
+	lastFrame []float32
+	concealed int
+
 	// Per-call media counters for /api/stats (dependency-free observability).
 	framesDecoded atomic.Uint64
 	dupDropped    atomic.Uint64
