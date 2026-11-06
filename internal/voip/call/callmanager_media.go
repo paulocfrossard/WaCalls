@@ -286,11 +286,48 @@ func (m *CallManager) onRelayData(data []byte) {
 		}
 		out = append(out, pcm)
 	}
+	m.emitPeerAudioLocked(out)
+}
+
+// emitPeerAudioLocked hands decoded frames to OnPeerAudio in decode order and
+// returns with m.mu released (no CallManager lock held on return).
+//
+// Caller holds m.mu — the jitter push + decode loop above ran under it.
+// emitMu is taken BEFORE m.mu is released: a second relay goroutine must not
+// decode and emit its newer frames between our unlock and our emission, or
+// the browser receives N+1 before N — one 60ms segment out of order is an
+// audible click. Lock order is always m.mu → emitMu; never acquire them in
+// the reverse order (emitMu is taken at no other site, so no cycle exists).
+//
+// m.mu is deliberately NOT held while the callback runs: OnPeerAudio →
+// session callback → registry → bridge WritePCM (datachannel Send) can apply
+// backpressure, which must never block call state. cleanupMedia/endCall take
+// m.mu but not emitMu, so a concurrent emission neither blocks them nor is
+// blocked by them; they simply wait for m.mu, which this function releases
+// before the first frame goes out.
+//
+// OnPeerAudio read (L4): it is assigned exactly once, in cmd/server/session.go
+// wireCall, immediately after NewCallManager and before the manager is
+// published to the registry or any relay can deliver data (connectRelays →
+// ConfigureRelays run later, from signaling). Nothing re-assigns it on a live
+// manager, so this is a snapshot of a stable func value — no lock protects
+// the field, and none is needed. The nil-check stays.
+func (m *CallManager) emitPeerAudioLocked(out [][]float32) {
+	if len(out) == 0 {
+		m.mu.Unlock()
+		return
+	}
+	m.emitMu.Lock()
+	onPeer := m.OnPeerAudio
 	m.mu.Unlock()
+	// defer: a panic inside the callback (recovered by the relay layer) must
+	// not leave emitMu locked forever and wedge every later emission.
+	defer m.emitMu.Unlock()
+	if onPeer == nil {
+		return
+	}
 	for _, pcm := range out {
-		if m.OnPeerAudio != nil {
-			m.OnPeerAudio(pcm)
-		}
+		onPeer(pcm)
 	}
 }
 

@@ -22,6 +22,15 @@ type CallManager struct {
 	mu          sync.Mutex
 	currentCall *CallInfo
 
+	// emitMu serializes OnPeerAudio emission across relay goroutines so
+	// frames decoded under mu reach the browser in decode order (a second
+	// 60ms segment overtaking the first is an audible click). Lock order is
+	// always mu → emitMu, never the reverse: it is taken while mu is held
+	// and released only after mu, so the emission callback runs with no
+	// CallManager lock held (datachannel backpressure cannot freeze call
+	// state). See emitPeerAudioLocked.
+	emitMu sync.Mutex
+
 	rtpSession  *media.RtpSession
 	srtpSession *media.SrtpSession
 	codec       media.Codec
