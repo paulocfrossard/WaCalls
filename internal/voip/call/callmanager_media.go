@@ -236,6 +236,12 @@ func (m *CallManager) onRelayData(data []byte) {
 	// Reorder by RTP sequence so the stateful codec decodes frames in
 	// production order; frames missing for jitterDepth newer packets are
 	// concealed instead of leaving a hole in the playout.
+	//
+	// The push AND the decode loop deliberately stay inside m.mu: releasing
+	// the lock between them would let a second relay goroutine decode its
+	// released frames before this one (breaking both the sequence order the
+	// jitter buffer just restored and the non-thread-safe codec), and the
+	// lock is only held for sub-millisecond decode work per frame.
 	if m.jitter == nil {
 		m.jitter = newJitterBuffer(jitterDepth)
 	}
@@ -255,6 +261,11 @@ func (m *CallManager) onRelayData(data []byte) {
 					"err":         err.Error(),
 					"payload_len": len(fr.payload),
 				})
+			}
+			// A present-but-undecodable frame still leaves a hole in the
+			// playout: conceal it exactly like a network loss.
+			if c := m.concealLocked(); c != nil {
+				out = append(out, c)
 			}
 			continue
 		}

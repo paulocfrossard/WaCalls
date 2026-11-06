@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -41,12 +42,33 @@ func (g *graceKeeper) arm(callID string) {
 	if t := g.timers[callID]; t != nil {
 		t.Stop()
 	}
-	g.timers[callID] = time.AfterFunc(g.window, func() {
+	// The callback re-checks that this exact timer is still the registered
+	// one before expiring: a cancel/re-arm that landed after the timer fired
+	// but before the callback took the lock wins, so a re-attached call is
+	// never terminated by a stale expiry.
+	var t *time.Timer
+	t = time.AfterFunc(g.window, func() {
 		g.mu.Lock()
+		if g.timers[callID] != t {
+			g.mu.Unlock()
+			return
+		}
 		delete(g.timers, callID)
 		g.mu.Unlock()
-		g.onExpire(callID)
+		g.safeExpire(callID)
 	})
+	g.timers[callID] = t
+}
+
+// safeExpire runs the expiry callback with panic recovery: time.AfterFunc
+// fires on its own goroutine, and a panic in EndCall must not kill the process.
+func (g *graceKeeper) safeExpire(callID string) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("grace expiry panicked; call left as-is", "call_id", callID, "panic", r)
+		}
+	}()
+	g.onExpire(callID)
 }
 
 func (g *graceKeeper) cancel(callID string) {

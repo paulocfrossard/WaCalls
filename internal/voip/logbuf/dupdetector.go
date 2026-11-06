@@ -45,16 +45,30 @@ var defaultDup = NewDupDetector()
 type writeSample struct {
 	at   time.Time
 	hash uint32
+	peak float32 // max |sample|; 0 when the payload was not provided
 }
 
-// hashPCM is a cheap FNV-1a over the float32 bit patterns.
-func hashPCM(pcm []float32) uint32 {
+// silenceFloor is the peak below which two identical writes are treated as
+// silence (concealment / DTX keepalive) instead of a duplicated audio path.
+const silenceFloor = 0.001 // ≈ -60 dBFS
+
+// hashPCM fingerprints the float32 bit patterns (FNV-1a) and returns the peak
+// amplitude in the same pass.
+func hashPCM(pcm []float32) (uint32, float32) {
 	h := uint32(2166136261)
+	var peak float32
 	for _, v := range pcm {
 		h ^= math.Float32bits(v)
 		h *= 16777619
+		a := v
+		if a < 0 {
+			a = -a
+		}
+		if a > peak {
+			peak = a
+		}
 	}
-	return h
+	return h, peak
 }
 
 // RecordWritePCM feeds one WritePCM timestamp (and its PCM fingerprint, when
@@ -80,7 +94,7 @@ func (d *DupDetector) Record(callID string, pcm ...[]float32) {
 	}
 	sample := writeSample{at: d.now()}
 	if len(pcm) > 0 && len(pcm[0]) > 0 {
-		sample.hash = hashPCM(pcm[0])
+		sample.hash, sample.peak = hashPCM(pcm[0])
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -133,11 +147,19 @@ func (d *DupDetector) Check() {
 				continue
 			}
 			// Two writes this close are only suspicious when they carry the
-			// SAME PCM (a duplicated audio path). Different content within the
-			// gap is a jitter-buffer catch-up releasing reordered frames.
+			// SAME audible PCM (a duplicated audio path). Different content
+			// within the gap is a jitter-buffer catch-up releasing reordered
+			// frames; identical near-silence is concealment/DTX, not a
+			// duplicated path. Unknown content (hash 0, legacy callers) keeps
+			// the timing-only rule.
 			prev, cur := kept[i-1], kept[i]
-			if prev.hash != 0 && cur.hash != 0 && prev.hash != cur.hash {
-				continue
+			if prev.hash != 0 && cur.hash != 0 {
+				if prev.hash != cur.hash {
+					continue
+				}
+				if prev.peak < silenceFloor && cur.peak < silenceFloor {
+					continue
+				}
 			}
 			a, b = prev, cur
 			found = true

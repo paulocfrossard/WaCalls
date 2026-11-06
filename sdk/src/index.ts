@@ -425,6 +425,12 @@ export class WaCallsClient {
    * server call keeps running so the operator can retry.
    */
   async resumeCall(sessionId: string, callId: string): Promise<void> {
+    // Refuse rather than tear down a different live call: #openMedia closes
+    // the current #active BEFORE the webrtc POST can be rejected (404/409),
+    // orphaning a working call server-side with only a toast to show for it.
+    if (this.#active && this.#active.callId !== callId) {
+      throw new Error("resumeCall: another call is active; hang up before resuming");
+    }
     await this.#openMedia(sessionId, callId);
   }
 

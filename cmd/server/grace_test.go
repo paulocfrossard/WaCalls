@@ -127,3 +127,23 @@ func TestSetBridgeCancelsGrace(t *testing.T) {
 		t.Fatalf("re-attach must cancel the grace timer, expired %d", expired.Load())
 	}
 }
+
+// TestSetBridgeCancelsGraceWhenReplacingBridge covers the real page-refresh
+// path: the dead leg's bridge is still registered when the new leg attaches,
+// so setBridge takes the oldB != nil branch — the countdown must still be
+// cancelled there (regression: the cancel used to sit after that branch).
+func TestSetBridgeCancelsGraceWhenReplacingBridge(t *testing.T) {
+	m := newTestManager(t)
+	s := m.addUnconnected(t, "grace-replace")
+	var expired atomic.Int32
+	s.grace = newGraceKeeper(10*time.Millisecond, func(string) { expired.Add(1) })
+
+	s.reg.add("c1", &activeCall{bridge: &Bridge{}}) // dead leg still registered
+	s.grace.arm("c1")
+	s.setBridge("c1", &Bridge{}) // re-attach replaces it
+
+	time.Sleep(40 * time.Millisecond)
+	if expired.Load() != 0 {
+		t.Fatalf("re-attach over an existing bridge must cancel the grace timer, expired %d", expired.Load())
+	}
+}

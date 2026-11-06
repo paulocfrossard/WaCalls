@@ -15,6 +15,9 @@ import (
 const (
 	relayConnectionTimeout = 20 * time.Second
 	relayKeepaliveInterval = 1100 * time.Millisecond
+	// relayIceGrace is how long a sustained ICE Disconnected may persist
+	// before the relay is declared dead (pion recovers from short blips).
+	relayIceGrace = 10 * time.Second
 )
 
 type relayConnState int
@@ -46,9 +49,33 @@ type relayConnection struct {
 	id           string
 	info         RelayConfig
 	localUfrag   string
-	keepalive    *time.Ticker
 	stopCh       chan struct{}
 	teardownOnce sync.Once
+
+	// iceGrace gives a transient ICE Disconnected a chance to recover before
+	// the connection is treated as dead. Guarded by iceGraceMu.
+	iceGraceMu sync.Mutex
+	iceGrace   *time.Timer
+}
+
+// armIceGrace (re)starts the give-up timer for a sustained ICE Disconnected;
+// every new Disconnected notification restarts the window.
+func (c *relayConnection) armIceGrace(window time.Duration, onExpire func()) {
+	c.iceGraceMu.Lock()
+	defer c.iceGraceMu.Unlock()
+	if c.iceGrace != nil {
+		c.iceGrace.Stop()
+	}
+	c.iceGrace = time.AfterFunc(window, onExpire)
+}
+
+func (c *relayConnection) cancelIceGrace() {
+	c.iceGraceMu.Lock()
+	defer c.iceGraceMu.Unlock()
+	if c.iceGrace != nil {
+		c.iceGrace.Stop()
+		c.iceGrace = nil
+	}
 }
 
 func (c *relayConnection) getState() relayConnState  { return relayConnState(c.state.Load()) }
@@ -71,6 +98,11 @@ type SctpRelayManager struct {
 	// instead of leaving it ACTIVE forever.
 	onAllLost  func()
 	everDialed bool
+	// pendingDials counts connectToRelay calls still in flight and dialing
+	// holds the ids being dialed (a relay is only published into connections
+	// once fully built). all-lost must not fire while a dial is pending.
+	pendingDials int
+	dialing      map[string]bool
 }
 
 func NewSctpRelayManager(log *slog.Logger) *SctpRelayManager {
@@ -93,17 +125,41 @@ func (m *SctpRelayManager) SetOnReceive(fn func(data []byte)) { m.onReceive = fn
 
 func (m *SctpRelayManager) SetOnAllLost(fn func()) { m.onAllLost = fn }
 
+// maybeAllLostLocked reports whether the all-lost condition holds right now:
+// no dial in flight, no connection left, and a dial cycle actually started.
+// It consumes the cycle (everDialed=false) so it fires at most once per cycle.
+// Caller holds m.mu; the returned func (if any) must run WITHOUT the lock.
+func (m *SctpRelayManager) maybeAllLostLocked() func() {
+	if m.pendingDials > 0 || len(m.connections) != 0 || !m.everDialed || m.onAllLost == nil {
+		return nil
+	}
+	m.everDialed = false // re-arm for the next dial cycle
+	return m.onAllLost
+}
+
 // noteConnectionLost reports whether the last dialed connection just went
 // away, firing onAllLost exactly once for that dial cycle.
 func (m *SctpRelayManager) noteConnectionLost() {
 	m.mu.Lock()
-	fire := len(m.connections) == 0 && m.everDialed && m.onAllLost != nil
-	fn := m.onAllLost
-	if fire {
-		m.everDialed = false // re-arm for the next dial cycle
-	}
+	fn := m.maybeAllLostLocked()
 	m.mu.Unlock()
-	if fire {
+	if fn != nil {
+		fn()
+	}
+}
+
+// dialFinished releases a dial reservation (id + pending count) when
+// connectToRelay returns, firing all-lost if that was the last pending dial
+// and nothing is left in the map (every dial in the cycle failed early).
+func (m *SctpRelayManager) dialFinished(id string) {
+	m.mu.Lock()
+	delete(m.dialing, id)
+	if m.pendingDials > 0 {
+		m.pendingDials--
+	}
+	fn := m.maybeAllLostLocked()
+	m.mu.Unlock()
+	if fn != nil {
 		fn()
 	}
 }
@@ -140,14 +196,28 @@ func (m *SctpRelayManager) ConfigureRelays(relays []RelayConfig) {
 		r.Port = port
 		id := connID(r.IP, port, r.AuthTokenID)
 		m.mu.Lock()
+		if m.dialing == nil {
+			m.dialing = map[string]bool{}
+		}
 		_, exists := m.connections[id]
-		m.mu.Unlock()
-		if exists {
+		if exists || m.dialing[id] {
+			m.mu.Unlock()
 			continue
 		}
+		// Reserve the id and count the pending dial BEFORE spawning: all-lost
+		// must not fire while a sibling dial has not published yet.
+		m.dialing[id] = true
+		m.pendingDials++
+		m.everDialed = true
+		m.mu.Unlock()
 		wg.Add(1)
 		go func(rc RelayConfig) {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					m.log.Error("panic in relay dial", "id", connID(rc.IP, rc.Port, rc.AuthTokenID), "panic", r)
+				}
+			}()
 			m.connectToRelay(rc)
 		}(r)
 	}
@@ -156,6 +226,9 @@ func (m *SctpRelayManager) ConfigureRelays(relays []RelayConfig) {
 
 func (m *SctpRelayManager) connectToRelay(info RelayConfig) {
 	id := connID(info.IP, info.Port, info.AuthTokenID)
+	// Always release the dial reservation (pending count + id) on every exit
+	// path, including panics: ConfigureRelays reserved it before spawning.
+	defer m.dialFinished(id)
 	m.log.Info("relay connecting", "id", id, "name", info.Name)
 
 	conn := &relayConnection{
@@ -163,10 +236,6 @@ func (m *SctpRelayManager) connectToRelay(info RelayConfig) {
 		info:   info,
 		stopCh: make(chan struct{}),
 	}
-	m.mu.Lock()
-	m.connections[id] = conn
-	m.everDialed = true
-	m.mu.Unlock()
 
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
@@ -178,8 +247,24 @@ func (m *SctpRelayManager) connectToRelay(info RelayConfig) {
 
 	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
 		m.log.Info("relay ice state", "id", id, "state", s.String())
-		if s == webrtc.ICEConnectionStateFailed || s == webrtc.ICEConnectionStateDisconnected {
+		switch s {
+		case webrtc.ICEConnectionStateFailed:
+			conn.cancelIceGrace()
 			m.failConnection(conn)
+		case webrtc.ICEConnectionStateDisconnected:
+			// pion recovers from transient Disconnected (consent checks);
+			// only give up after a sustained blip. The window restarts on
+			// every notification, so a flapping link keeps getting grace.
+			conn.armIceGrace(relayIceGrace, func() {
+				defer func() {
+					if r := recover(); r != nil {
+						m.log.Error("panic in relay ice grace", "id", id, "panic", r)
+					}
+				}()
+				m.failConnection(conn)
+			})
+		case webrtc.ICEConnectionStateConnected, webrtc.ICEConnectionStateCompleted:
+			conn.cancelIceGrace()
 		}
 	})
 
@@ -225,6 +310,17 @@ func (m *SctpRelayManager) connectToRelay(info RelayConfig) {
 
 	conn.localUfrag = extractFirst(reUfrag, offer.SDP)
 	munged := m.modifySdpForRelay(offer.SDP, info)
+
+	// Publish the fully-built connection BEFORE enabling the signaling that
+	// callbacks can fire on (SetRemoteDescription): Broadcast/teardown/
+	// closeConnection then never observe half-initialized pointers (pc and
+	// channel are assigned above), and an early OnClose always finds the
+	// conn in the map. Failures before this point call failConnection on an
+	// unpublished conn — a no-op delete — and the pending-dial counter in
+	// noteConnectionLost keeps all-lost from firing mid-cycle.
+	m.mu.Lock()
+	m.connections[id] = conn
+	m.mu.Unlock()
 
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: munged}); err != nil {
 		m.log.Error("relay set remote description failed", "id", id, "err", err)
@@ -354,7 +450,6 @@ func (m *SctpRelayManager) sendStunRegistration(conn *relayConnection) {
 func (m *SctpRelayManager) startKeepalive(conn *relayConnection) {
 	m.sendRaw(conn, BuildWhatsAppPing())
 	ticker := time.NewTicker(relayKeepaliveInterval)
-	conn.keepalive = ticker
 	go func() {
 		for {
 			select {
@@ -465,9 +560,10 @@ func (m *SctpRelayManager) closeConnection(id string) {
 func (m *SctpRelayManager) teardown(conn *relayConnection) {
 	conn.teardownOnce.Do(func() {
 		close(conn.stopCh)
-		if conn.keepalive != nil {
-			conn.keepalive.Stop()
-		}
+		// The keepalive goroutine owns its ticker: it stops it when stopCh
+		// closes (or never starts if OnOpen never fired), so there is no
+		// ticker field to race with here.
+		conn.cancelIceGrace()
 		if conn.channel != nil {
 			_ = conn.channel.Close()
 		}

@@ -330,6 +330,11 @@ func (s *Session) info() SessionInfo {
 }
 
 func (s *Session) setBridge(callID string, b *Bridge) {
+	// A fresh browser leg re-attached: cancel any pending grace countdown so
+	// the call is no longer waiting for the old (refreshed-away) leg. This
+	// must happen even when a previous (dead) bridge is still registered —
+	// that is exactly the page-refresh path.
+	s.grace.cancel(callID)
 	oldB, found := s.reg.setBridge(callID, b)
 	if !found {
 		logbuf.LogEvent("bridge", logbuf.LevelWarn, "setBridge: call not found, new bridge closed", map[string]any{
@@ -351,9 +356,6 @@ func (s *Session) setBridge(callID string, b *Bridge) {
 		oldB.Close()
 		return
 	}
-	// A fresh browser leg re-attached: cancel any pending grace countdown so
-	// the call is no longer waiting for the old (refreshed-away) leg.
-	s.grace.cancel(callID)
 	peer := "unknown"
 	if rec, ok := s.mgr.broker.getCall(s.id, callID); ok {
 		peer = maskPeer(rec.Peer)
