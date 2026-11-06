@@ -197,3 +197,151 @@ func TestConfigureRelaysTwoPassReservations(t *testing.T) {
 		t.Fatalf("all-lost fired %d times after losing both, want 1", fired)
 	}
 }
+
+// TestFailConnectionIdentityDelete (M5): a stale failure from a conn that was
+// already removed must not evict a re-dialed conn occupying the same id —
+// only the stored pointer's identity authorizes the delete.
+func TestFailConnectionIdentityDelete(t *testing.T) {
+	m := NewSctpRelayManager(nil)
+	fired := 0
+	m.SetOnAllLost(func() { fired++ })
+
+	const id = "9.9.9.9:3478"
+	a := &relayConnection{id: id, stopCh: make(chan struct{})}
+	a.setState(relayStateOpen)
+	m.mu.Lock()
+	m.connections[id] = a
+	m.everDialed = true
+	m.mu.Unlock()
+
+	// A is removed (prior fail/close), then a re-dial publishes B under the
+	// same id — the setup M5 guards: A's late callback must not delete B.
+	m.mu.Lock()
+	delete(m.connections, id)
+	m.mu.Unlock()
+	b := &relayConnection{id: id, stopCh: make(chan struct{})}
+	b.setState(relayStateOpen)
+	m.mu.Lock()
+	m.connections[id] = b
+	m.mu.Unlock()
+
+	m.failConnection(a) // stale failure
+
+	m.mu.Lock()
+	cur := m.connections[id]
+	m.mu.Unlock()
+	if cur != b {
+		t.Fatalf("stale failConnection evicted the re-dialed conn: got %p, want %p", cur, b)
+	}
+	if a.getState() != relayStateFailed {
+		t.Fatalf("stale conn state = %d, want Failed", a.getState())
+	}
+	if b.getState() != relayStateOpen {
+		t.Fatalf("re-dialed conn state = %d, want Open (untouched)", b.getState())
+	}
+	// noteConnectionLost must NOT fire: the live conn still occupies the id,
+	// so len(connections) > 0 even though the delete was skipped.
+	if fired != 0 {
+		t.Fatalf("all-lost fired %d times while a live conn occupies the id", fired)
+	}
+	// The stale conn is still torn down (its own resources), B is not.
+	select {
+	case <-a.stopCh:
+	default:
+		t.Fatal("stale conn must still be torn down")
+	}
+	select {
+	case <-b.stopCh:
+		t.Fatal("re-dialed conn must not be torn down by the stale failure")
+	default:
+	}
+
+	// Failing B for real removes it and fires all-lost exactly once.
+	m.failConnection(b)
+	m.mu.Lock()
+	_, exists := m.connections[id]
+	m.mu.Unlock()
+	if exists {
+		t.Fatal("failed conn must be removed from the map")
+	}
+	if fired != 1 {
+		t.Fatalf("all-lost fired %d times after losing the last conn, want 1", fired)
+	}
+}
+
+// TestIceGraceStillCurrentValidation (L2): the timer-identity check that
+// guards the grace expiry — armed is current; cancel and re-arm invalidate
+// the previously registered timer so a stale expiry aborts.
+func TestIceGraceStillCurrentValidation(t *testing.T) {
+	c := &relayConnection{stopCh: make(chan struct{})}
+
+	c.armIceGrace(time.Hour, func() { t.Error("hour-long grace must not fire") })
+	c.iceGraceMu.Lock()
+	armed := c.iceGrace
+	c.iceGraceMu.Unlock()
+	if armed == nil {
+		t.Fatal("armIceGrace must register a timer")
+	}
+	if !c.iceGraceStillCurrent(armed) {
+		t.Fatal("armed timer must validate as current")
+	}
+
+	// Cancel (ICE Connected recovered) invalidates the timer: Stop() may
+	// have returned false because it already fired, so only this identity
+	// check can abort the pending fail.
+	c.cancelIceGrace()
+	if c.iceGraceStillCurrent(armed) {
+		t.Fatal("cancelled timer must not validate as current")
+	}
+
+	// Re-arm (a new Disconnected restarts the window) also invalidates the
+	// previous timer, so an expiry from the old window cannot fail the
+	// re-armed connection.
+	c.armIceGrace(time.Hour, func() {})
+	c.iceGraceMu.Lock()
+	rearmed := c.iceGrace
+	c.iceGraceMu.Unlock()
+	if rearmed == nil || rearmed == armed {
+		t.Fatal("re-arm must install a new timer")
+	}
+	if c.iceGraceStillCurrent(armed) {
+		t.Fatal("previous timer must not validate after a re-arm")
+	}
+	if !c.iceGraceStillCurrent(rearmed) {
+		t.Fatal("current timer must validate after a re-arm")
+	}
+	armed.Stop()
+	rearmed.Stop()
+}
+
+// TestIceGraceFiredCallbackSeesCancel (L2): cancel landing after the window
+// elapsed but before the fired callback validated the timer identity must
+// abort the fail — the exact window where time.Timer.Stop() returns false.
+func TestIceGraceFiredCallbackSeesCancel(t *testing.T) {
+	c := &relayConnection{stopCh: make(chan struct{})}
+	var fired atomic.Int32
+
+	c.armIceGrace(50*time.Millisecond, func() { fired.Add(1) })
+	// Hold the identity lock so the fired callback blocks inside
+	// iceGraceStillCurrent, opening the window a real cancel lands in.
+	c.iceGraceMu.Lock()
+	time.Sleep(150 * time.Millisecond) // window elapsed; callback is blocked
+	// Apply cancelIceGrace's critical section while holding the lock (it
+	// cannot run concurrently here: it takes the same mutex).
+	if c.iceGrace != nil {
+		c.iceGrace.Stop()
+		c.iceGrace = nil
+	}
+	c.iceGraceMu.Unlock() // callback now re-checks identity and must abort
+
+	time.Sleep(50 * time.Millisecond)
+	if fired.Load() != 0 {
+		t.Fatalf("stale grace expiry ran the fail callback %d times after cancel", fired.Load())
+	}
+	c.iceGraceMu.Lock()
+	still := c.iceGrace
+	c.iceGraceMu.Unlock()
+	if still != nil {
+		t.Fatal("grace timer must be cleared by the cancel")
+	}
+}

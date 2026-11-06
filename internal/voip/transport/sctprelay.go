@@ -66,7 +66,43 @@ func (c *relayConnection) armIceGrace(window time.Duration, onExpire func()) {
 	if c.iceGrace != nil {
 		c.iceGrace.Stop()
 	}
-	c.iceGrace = time.AfterFunc(window, onExpire)
+	// The callback re-checks that this exact timer is still the registered
+	// one before expiring (mirrors cmd/server/grace.go): time.Timer.Stop
+	// returns false once the timer has already fired, so a cancel (ICE
+	// Connected recovered) or a re-arm (new Disconnected) that landed after
+	// the fire but before the callback took this lock must win — a recovered
+	// connection is never failed by a stale expiry. Declared separately so
+	// the closure can reference t; t is READ only while holding iceGraceMu
+	// (the assignment below also happens under that lock), otherwise the
+	// capture races with the assignment. The fail logic (onExpire) runs
+	// OUTSIDE the lock.
+	var t *time.Timer
+	t = time.AfterFunc(window, func() {
+		c.iceGraceMu.Lock()
+		current := c.iceGraceStillCurrentLocked(t)
+		c.iceGraceMu.Unlock()
+		if !current {
+			return
+		}
+		onExpire()
+	})
+	c.iceGrace = t
+}
+
+// iceGraceStillCurrentLocked reports whether t is still the connection's
+// registered grace timer. Caller must hold iceGraceMu.
+func (c *relayConnection) iceGraceStillCurrentLocked(t *time.Timer) bool {
+	return c.iceGrace == t
+}
+
+// iceGraceStillCurrent reports whether t is still the connection's registered
+// grace timer. It is false when the timer was cancelled (field nil) or
+// re-armed (field replaced) after t fired but before t's callback validated
+// the identity — that stale expiry must not fail the connection.
+func (c *relayConnection) iceGraceStillCurrent(t *time.Timer) bool {
+	c.iceGraceMu.Lock()
+	defer c.iceGraceMu.Unlock()
+	return c.iceGraceStillCurrentLocked(t)
 }
 
 func (c *relayConnection) cancelIceGrace() {
@@ -550,12 +586,25 @@ func (m *SctpRelayManager) failConnection(conn *relayConnection) {
 		return
 	}
 	conn.setState(relayStateFailed)
-	delete(m.connections, conn.id)
+	// Identity-checked delete: drop the entry only if it still points at
+	// THIS conn. A late failure from an already-removed conn (stale ICE,
+	// grace or watchdog callback) must not evict a re-dialed conn that now
+	// occupies the same id. The state transition above always applies to the
+	// caller's conn; when the delete is skipped the map keeps its live
+	// occupant, so noteConnectionLost sees len>0 and does not fire.
+	if cur, ok := m.connections[conn.id]; ok && cur == conn {
+		delete(m.connections, conn.id)
+	}
 	m.mu.Unlock()
 	m.noteConnectionLost()
 	m.teardown(conn)
 }
 
+// closeConnection resolves conn by id FIRST and then applies the state
+// transition and the delete to that same looked-up conn inside a single
+// critical section, so state and delete can never diverge (unlike
+// failConnection, which is handed a caller-owned pointer). No caller-pointer
+// mismatch class of bug exists here — confirmed, no change needed.
 func (m *SctpRelayManager) closeConnection(id string) {
 	m.mu.Lock()
 	conn := m.connections[id]
